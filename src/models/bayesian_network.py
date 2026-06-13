@@ -1,3 +1,4 @@
+import json
 import math
 from datetime import datetime, timezone
 import psycopg2
@@ -29,7 +30,8 @@ def process_cognitive_update(
     last_practiced_days: float,
     decay_rate: float,
     success: bool,
-    behavioral_flags: list
+    behavioral_flags: list,
+    influence_weight: float = 1.0
 ) -> tuple:
     # 1. Apply Ebbinghaus forgetting decay
     decayed_alpha = apply_ebbinghaus_decay(prior_alpha, last_practiced_days, decay_rate)
@@ -46,9 +48,9 @@ def process_cognitive_update(
         beta_modifier += 0.8
 
     if success:
-        alpha_modifier += 1.0
+        alpha_modifier += 1.0 * influence_weight
     else:
-        beta_modifier += 1.0
+        beta_modifier += 1.0 * influence_weight
 
     new_alpha = decayed_alpha + alpha_modifier
     new_beta = decayed_beta + beta_modifier
@@ -70,8 +72,8 @@ def fetch_or_init_state(user_id: str, node_id: str, mongo_db, pg_conn) -> dict:
       "node_id": node_id,
       "distribution": {
         "type": "BETA",
-        "alpha": 1.0,
-        "beta": 1.0,
+        "alpha": 2.0,
+        "beta": 2.0,
         "variance": 0.0833,
         "confidence_interval_95": [0.05, 0.95]
       },
@@ -92,7 +94,7 @@ def fetch_or_init_state(user_id: str, node_id: str, mongo_db, pg_conn) -> dict:
             VALUES (%s, %s, %s, %s, %s, NOW())
             ON CONFLICT (user_id, node_id) DO NOTHING;
             """,
-            (user_id, node_id, 1.0, 1.0, 0.50)
+            (user_id, node_id, 2.0, 2.0, 0.50)
         )
         pg_conn.commit()
         
@@ -156,22 +158,34 @@ def propagate_updates_up_dag(
     event_timestamp: datetime,
     mongo_db,
     pg_conn,
-    gamma: float = 0.5
+    r_client=None,
+    gamma: float = 1.0
 ):
-    with pg_conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            """
-            SELECT source_node, correlation_weight 
-            FROM advanced_dag_edges 
-            WHERE target_node = %s;
-            """,
-            (target_node,)
-        )
-        edges = cur.fetchall()
+    edges = []
+    if r_client:
+        try:
+            cached_edges = r_client.hget("global_dag", target_node)
+            if cached_edges:
+                edges = json.loads(cached_edges)
+        except Exception as e:
+            print(f"[DAG] Error fetching DAG from Redis: {e}")
+
+    if not edges:
+        with pg_conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT source_node, correlation_weight, w_pre, w_diag
+                FROM advanced_dag_edges 
+                WHERE target_node = %s;
+                """,
+                (target_node,)
+            )
+            edges = cur.fetchall()
         
     for edge in edges:
         parent_node = edge["source_node"]
-        weight = float(edge["correlation_weight"])
+        w_pre = float(edge.get("w_pre") or edge.get("correlation_weight") or 0.0)
+        w_diag = float(edge.get("w_diag") or edge.get("correlation_weight") or 0.0)
         
         parent_state = fetch_or_init_state(user_id, parent_node, mongo_db, pg_conn)
         
@@ -189,13 +203,12 @@ def propagate_updates_up_dag(
         )
         decayed_beta = parent_state["distribution"]["beta"]
         
-        discounted_delta = weight * gamma
         if success:
-            new_alpha = decayed_alpha + discounted_delta
+            new_alpha = decayed_alpha + (1.0 * w_pre)
             new_beta = decayed_beta
         else:
             new_alpha = decayed_alpha
-            new_beta = decayed_beta + discounted_delta
+            new_beta = decayed_beta + (1.0 * w_diag)
             
         new_mastery = calculate_expected_mastery(new_alpha, new_beta)
         
