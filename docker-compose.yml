@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  engine-python:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sahai-engine-python
+    env_file:
+      - ../../ENV/.env
+    environment:
+      - ENV_MODE=development
