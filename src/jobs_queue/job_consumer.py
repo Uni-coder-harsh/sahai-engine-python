@@ -1,4 +1,5 @@
 import json
+import time
 from datetime import datetime
 import redis
 import config
@@ -169,16 +170,21 @@ class TelemetryJobConsumer:
         try:
             while True:
                 try:
-                    # Polling Redis queue with a safe 5s timeout to prevent socket hanging
-                    packed = self.r_client.blpop(config.TELEMETRY_QUEUE, timeout=5)
+                    # Polling Redis queue with a safe 30s timeout to prevent socket hanging
+                    packed = self.r_client.blpop(config.TELEMETRY_QUEUE, timeout=30)
                     if packed:
                         _, message_json = packed
                         event = json.loads(message_json)
                         self.handle_telemetry_event(event)
-                except redis.exceptions.TimeoutError:
-                    continue
+                except redis.exceptions.TimeoutError as te:
+                    logger.warning(f"Redis timeout/socket error: {te}. Sleeping 5s before retrying...")
+                    time.sleep(5)
+                except (redis.exceptions.ConnectionError, redis.exceptions.RedisError) as re:
+                    logger.error(f"Redis connection error: {re}. Sleeping 5s before retrying...")
+                    time.sleep(5)
                 except Exception as ex:
-                    logger.error(f"Loop error occurred: {ex}")
+                    logger.error(f"Loop error occurred: {ex}. Sleeping 5s before retrying...")
+                    time.sleep(5)
         except KeyboardInterrupt:
             logger.info("Shutting down listener.")
         finally:

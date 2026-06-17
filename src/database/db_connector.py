@@ -16,7 +16,7 @@ class DatabaseConnector:
     def connect_redis(self):
         if not self.redis_client:
             url = config.REDIS_URL
-            kwargs = {}
+            kwargs = {"socket_keepalive": True}
             if url and url.startswith("redis://"):
                 url = url.replace("redis://", "rediss://", 1)
                 kwargs["ssl_cert_reqs"] = None
