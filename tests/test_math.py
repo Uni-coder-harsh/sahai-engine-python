@@ -26,7 +26,7 @@ def test_expected_mastery():
 
 def test_cognitive_update_success():
     # A fresh user with 0 days elapsed
-    alpha, beta, mastery = process_cognitive_update(
+    alpha, beta, mastery, behavior_class = process_cognitive_update(
         prior_alpha=1.0,
         prior_beta=1.0,
         last_practiced_days=0,
@@ -37,9 +37,10 @@ def test_cognitive_update_success():
     assert alpha == 2.0
     assert beta == 1.0
     assert mastery == 2.0 / 3.0
+    assert behavior_class == 0
 
 def test_cognitive_update_failure():
-    alpha, beta, mastery = process_cognitive_update(
+    alpha, beta, mastery, behavior_class = process_cognitive_update(
         prior_alpha=1.0,
         prior_beta=1.0,
         last_practiced_days=0,
@@ -50,18 +51,25 @@ def test_cognitive_update_failure():
     assert alpha == 1.0
     assert beta == 2.0
     assert mastery == 1.0 / 3.0
+    assert behavior_class == 0
 
 def test_copy_paste_dependency_handling():
     # Success attempt but user pasted code
-    alpha, beta, mastery = process_cognitive_update(
+    alpha, beta, mastery, behavior_class = process_cognitive_update(
         prior_alpha=1.0,
         prior_beta=1.0,
         last_practiced_days=0,
         decay_rate=0.02,
         success=True,
-        behavioral_flags=["COPY_PASTE_PRONE"]
+        behavioral_flags=[],
+        telemetry_data={
+            "paste_char_count": 50,
+            "backspace_count": 0
+        }
     )
-    # alpha gets +1.0 for success. beta gets +1.5 for copy paste dependency.
-    assert alpha == 2.0
-    assert beta == 2.5
-    assert mastery == 2.0 / 4.5
+    # behavior_class should be 2 (Copy-Paste)
+    assert behavior_class == 2
+    # alpha gets +0.1 (discounts 90%)
+    assert alpha == 1.1
+    assert beta == 1.0
+    assert mastery == 1.1 / 2.1
