@@ -22,13 +22,14 @@ class TelemetryHTTPHandler(BaseHTTPRequestHandler):
                 event = json.loads(post_data.decode('utf-8'))
                 
                 # Relocate/Process the event using the consumer logic
+                result = {"success": True}
                 if consumer:
-                    consumer.handle_telemetry_event(event)
+                    result = consumer.handle_telemetry_event(event) or {"success": True}
                 
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
-                self.wfile.write(json.dumps({"success": True}).encode('utf-8'))
+                self.wfile.write(json.dumps(result).encode('utf-8'))
             except Exception as e:
                 logger.error(f"Error processing HTTP telemetry event: {e}")
                 self.send_response(500)

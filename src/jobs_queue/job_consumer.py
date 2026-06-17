@@ -91,16 +91,27 @@ class TelemetryJobConsumer:
         
         decay_rate = state["temporal_factors"].get("forgetting_curve_decay_rate", config.DEFAULT_DECAY_RATE)
         
-        # 2. Compute Bayesian updates for primary concept
-        new_alpha, new_beta, expected_mastery = process_cognitive_update(
+        # 2. Compute Bayesian updates for primary concept with ML behavioral modifier
+        telemetry_data = {
+            "time_spent_seconds": event.get("time_spent_seconds", 30),
+            "run_count": event.get("run_count", 0),
+            "backspace_count": event.get("backspace_count", 0),
+            "paste_char_count": event.get("paste_char_count", 0),
+            "syntax_error_count": event.get("syntax_error_count", 0)
+        }
+        
+        new_alpha, new_beta, expected_mastery, behavior_class = process_cognitive_update(
             prior_alpha=prior_alpha,
             prior_beta=prior_beta,
             last_practiced_days=last_practiced_days,
             decay_rate=decay_rate,
             success=success,
             behavioral_flags=behavioral_flags,
-            influence_weight=influence_weight
+            influence_weight=influence_weight,
+            telemetry_data=telemetry_data
         )
+        
+        logger.info(f"ML Classifier predicted behavior class: {behavior_class} for User {user_id}")
         
         # 3. Commit updated distribution to Postgres and Mongo
         save_cognitive_state(
@@ -117,6 +128,7 @@ class TelemetryJobConsumer:
         logger.info(f"Saved Node: {node_id} (Mastery: {expected_mastery:.4f})")
         
         # 4. Handle Option Misconceptions (if incorrect)
+        misconceptions_updated = []
         for misc in misconceptions:
             m_node_id = misc["node_id"]
             m_weight = misc["weight"]
@@ -152,9 +164,14 @@ class TelemetryJobConsumer:
                 pg_conn=self.pg_conn
             )
             logger.info(f"Misconception Updated: {m_node_id} (Mastery: {m_expected_mastery:.4f})")
+            misconceptions_updated.append({
+                "node_id": m_node_id,
+                "weight": m_weight,
+                "expected_mastery": float(m_expected_mastery)
+            })
         
         # 5. Propagate up the Curriculum DAG
-        propagate_updates_up_dag(
+        propagations = propagate_updates_up_dag(
             user_id=user_id,
             target_node=node_id,
             success=success,
@@ -164,6 +181,18 @@ class TelemetryJobConsumer:
             r_client=self.r_client,
             gamma=config.DEFAULT_GAMMA
         )
+
+        return {
+            "success": True,
+            "user_id": user_id,
+            "node_id": node_id,
+            "behavior_class": behavior_class,
+            "alpha": float(new_alpha),
+            "beta": float(new_beta),
+            "expected_mastery": float(expected_mastery),
+            "misconceptions_updated": misconceptions_updated,
+            "propagations": propagations
+        }
 
     def listen(self):
         logger.info(f"Listening on Redis queue: '{config.TELEMETRY_QUEUE}'...")
