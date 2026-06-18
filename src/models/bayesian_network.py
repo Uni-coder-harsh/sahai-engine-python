@@ -58,23 +58,53 @@ else:
 
 
 def calculate_variance(alpha: float, beta: float) -> float:
-    total = alpha + beta
-    denom = (total ** 2) * (total + 1.0)
-    if denom == 0:
-        return 0.0
-    return (alpha * beta) / denom
+    try:
+        alpha = float(alpha)
+        beta = float(beta)
+        if math.isnan(alpha) or math.isnan(beta):
+            return 0.0833
+        total = alpha + beta
+        denom = (total ** 2) * (total + 1.0)
+        if denom <= 0 or math.isnan(denom) or math.isinf(denom):
+            return 0.0833
+        val = (alpha * beta) / denom
+        if math.isnan(val) or math.isinf(val):
+            return 0.0833
+        return val
+    except Exception:
+        return 0.0833
 
 def apply_ebbinghaus_decay(alpha: float, time_delta_days: float, decay_rate: float) -> float:
-    if time_delta_days <= 0:
-        return alpha
-    decayed = 1.0 + (alpha - 1.0) * math.exp(-decay_rate * time_delta_days)
-    return max(1.0, decayed)
+    try:
+        alpha = float(alpha)
+        time_delta_days = float(time_delta_days)
+        decay_rate = float(decay_rate)
+        if math.isnan(alpha) or math.isnan(time_delta_days) or math.isnan(decay_rate):
+            return 2.0
+        if time_delta_days <= 0:
+            return alpha
+        decayed = 1.0 + (alpha - 1.0) * math.exp(-decay_rate * time_delta_days)
+        if math.isnan(decayed) or math.isinf(decayed):
+            return 1.0
+        return max(1.0, decayed)
+    except Exception:
+        return 1.0
 
 def calculate_expected_mastery(alpha: float, beta: float) -> float:
-    total = alpha + beta
-    if total == 0:
+    try:
+        alpha = float(alpha)
+        beta = float(beta)
+        if math.isnan(alpha) or math.isnan(beta):
+            return 0.5
+        total = alpha + beta
+        if total <= 0:
+            return 0.5
+        val = alpha / total
+        if math.isnan(val) or math.isinf(val):
+            return 0.5
+        return val
+    except Exception:
         return 0.5
-    return alpha / total
 
 def classify_telemetry(interaction_type: str, metrics: dict, is_correct: bool = True) -> str:
     """
