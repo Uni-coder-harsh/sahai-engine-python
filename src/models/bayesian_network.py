@@ -4,6 +4,32 @@ from datetime import datetime, timezone
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import config
+import pickle
+from pathlib import Path
+
+# Live Inference Bridge: Load the Random Forest classifier at startup
+model = None
+model_path = None
+curr_dir = Path(__file__).resolve().parent
+for _ in range(5):
+    check_path = curr_dir / "models" / "telemetry_rf_v1.pkl"
+    if check_path.exists():
+        model_path = check_path
+        break
+    if curr_dir == curr_dir.parent:
+        break
+    curr_dir = curr_dir.parent
+
+if model_path:
+    try:
+        with open(model_path, "rb") as f:
+            model = pickle.load(f)
+        print(f"[ML Bridge] Successfully loaded Random Forest model from {model_path}")
+    except Exception as e:
+        print(f"[ML Bridge] Warning: Failed to load model from {model_path} ({e}). Falling back to rule-based simulation.")
+else:
+    print("[ML Bridge] Warning: telemetry_rf_v1.pkl not found in parent directory tree. Falling back to rule-based simulation.")
+
 
 def calculate_variance(alpha: float, beta: float) -> float:
     total = alpha + beta
@@ -26,11 +52,20 @@ def calculate_expected_mastery(alpha: float, beta: float) -> float:
 
 def classify_telemetry(time_spent_seconds: float, run_count: int, backspace_count: int, paste_char_count: int, syntax_error_count: int) -> int:
     """
-    Simulates a Random Forest telemetry classifier predicting:
+    Predicts student coding behavior:
     0: Normal
     1: Shotgun Debugging (high run count, low time)
     2: Copy-Paste Dependency (high paste count, low backspace)
     """
+    if model is not None:
+        try:
+            # Telemetry Data Mapping: Exact feature columns order used in training
+            prediction = model.predict([[time_spent_seconds, run_count, backspace_count, paste_char_count, syntax_error_count]])
+            return int(prediction[0])
+        except Exception as e:
+            print(f"[ML Bridge] Inference error: {e}. Falling back to rules.")
+            
+    # Fallback to rule-based classification if model is not loaded or fails
     if paste_char_count > 30 and backspace_count < 2:
         return 2  # Copy-Paste
     if run_count > 4 and time_spent_seconds < 15:
