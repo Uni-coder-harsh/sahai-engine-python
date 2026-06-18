@@ -36,6 +36,20 @@ class TelemetryHTTPHandler(BaseHTTPRequestHandler):
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode('utf-8'))
+        elif self.path == "/trigger-process-queue":
+            try:
+                if consumer:
+                    consumer.trigger_processing()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": True, "message": "Queue processing triggered"}).encode('utf-8'))
+            except Exception as e:
+                logger.error(f"Error triggering queue processing: {e}")
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode('utf-8'))
         else:
             self.send_response(404)
             self.end_headers()

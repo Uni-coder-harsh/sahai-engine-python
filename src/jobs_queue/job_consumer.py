@@ -1,5 +1,6 @@
 import json
 import time
+import threading
 from datetime import datetime
 import redis
 import config
@@ -25,6 +26,10 @@ class TelemetryJobConsumer:
         self.pg_conn = db_connector.connect_postgres()
         self.mongo_db = db_connector.connect_mongo()
         self.cache_global_dag()
+        
+        # Threading lock and status flag for on-demand queue processing
+        self.lock = threading.Lock()
+        self.is_processing = False
 
     def cache_global_dag(self):
         logger.info("Caching global DAG edges to Redis...")
@@ -62,6 +67,13 @@ class TelemetryJobConsumer:
             logger.error(f"Failed to cache global DAG to Redis: {e}")
 
     def handle_telemetry_event(self, event: dict):
+        # 1. Log the raw JSON payload permanently to MongoDB
+        try:
+            self.mongo_db["raw_telemetry_logs"].insert_one(event.copy())
+            logger.info("Raw telemetry payload logged to MongoDB raw_telemetry_logs.")
+        except Exception as mongo_err:
+            logger.error(f"Failed to log raw telemetry payload to MongoDB: {mongo_err}")
+
         user_id = event["user_id"]
         node_id = event["node_id"]
         success = event["success"]
@@ -76,9 +88,14 @@ class TelemetryJobConsumer:
             event_timestamp = datetime.fromisoformat(event_time_str.replace("Z", "+00:00"))
         else:
             event_timestamp = event_time_str
-        logger.info(f"Processing telemetry: User {user_id}, Node {node_id}, Success: {success}, Weight: {influence_weight}")
         
-        # 1. Load belief parameters for primary concept
+        # Determine interaction type and extract metrics
+        interaction_type = event.get("interaction_type", event.get("event_type", "Code"))
+        telemetry_data = event.get("metrics", event)
+
+        logger.info(f"Processing telemetry: User {user_id}, Node {node_id}, Success: {success}, Interaction: {interaction_type}")
+        
+        # Load belief parameters for primary concept
         state = fetch_or_init_state(user_id, node_id, self.mongo_db, self.pg_conn)
         prior_alpha = state["distribution"]["alpha"]
         prior_beta = state["distribution"]["beta"]
@@ -91,15 +108,7 @@ class TelemetryJobConsumer:
         
         decay_rate = state["temporal_factors"].get("forgetting_curve_decay_rate", config.DEFAULT_DECAY_RATE)
         
-        # 2. Compute Bayesian updates for primary concept with ML behavioral modifier
-        telemetry_data = {
-            "time_spent_seconds": event.get("time_spent_seconds", 30),
-            "run_count": event.get("run_count", 0),
-            "backspace_count": event.get("backspace_count", 0),
-            "paste_char_count": event.get("paste_char_count", 0),
-            "syntax_error_count": event.get("syntax_error_count", 0)
-        }
-        
+        # Compute Bayesian updates for primary concept with ML behavioral modifier
         new_alpha, new_beta, expected_mastery, behavior_class = process_cognitive_update(
             prior_alpha=prior_alpha,
             prior_beta=prior_beta,
@@ -108,12 +117,30 @@ class TelemetryJobConsumer:
             success=success,
             behavioral_flags=behavioral_flags,
             influence_weight=influence_weight,
-            telemetry_data=telemetry_data
+            telemetry_data=telemetry_data,
+            interaction_type=interaction_type
         )
         
-        logger.info(f"ML Classifier predicted behavior class: {behavior_class} for User {user_id}")
+        # Print structured log showing behavioral class and updates
+        logger.info(f"""
+==================================================
+           ML INFERENCE & COGNITIVE UPDATE
+==================================================
+Event ID:          {event.get('event_id', 'N/A')}
+User ID:          {user_id}
+Node ID:          {node_id}
+Interaction Type: {interaction_type}
+Predicted Class:  {behavior_class}
+Success:          {success}
+--------------------------------------------------
+Bayesian Updates:
+Prior Alpha:      {prior_alpha:.4f} -> New Alpha: {new_alpha:.4f}
+Prior Beta:       {prior_beta:.4f} -> New Beta:  {new_beta:.4f}
+New Mastery Mean: {expected_mastery:.4f}
+==================================================
+""")
         
-        # 3. Commit updated distribution to Postgres and Mongo
+        # Commit updated distribution to Postgres and Mongo
         save_cognitive_state(
             user_id=user_id,
             node_id=node_id,
@@ -193,6 +220,36 @@ class TelemetryJobConsumer:
             "misconceptions_updated": misconceptions_updated,
             "propagations": propagations
         }
+
+    def trigger_processing(self):
+        """Triggers the on-demand queue processor thread if not already running."""
+        with self.lock:
+            if not self.is_processing:
+                self.is_processing = True
+                threading.Thread(target=self._process_queue_loop, daemon=True).start()
+                logger.info("Triggered on-demand Redis queue processing thread.")
+
+    def _process_queue_loop(self):
+        """Pulls and processes events from Redis until the queue is completely empty."""
+        logger.info(f"On-demand queue processing thread started. Reading queue '{config.TELEMETRY_QUEUE}'...")
+        try:
+            while True:
+                # Non-blocking pop from Redis list
+                packed = self.r_client.lpop(config.TELEMETRY_QUEUE)
+                if not packed:
+                    logger.info("Redis queue is empty. Terminating on-demand processor thread.")
+                    break
+                
+                try:
+                    event = json.loads(packed)
+                    self.handle_telemetry_event(event)
+                except Exception as e:
+                    logger.error(f"Error handling telemetry event from queue: {e}")
+        except Exception as e:
+            logger.error(f"Error in on-demand queue processing loop: {e}")
+        finally:
+            with self.lock:
+                self.is_processing = False
 
     def listen(self):
         logger.info(f"Listening on Redis queue: '{config.TELEMETRY_QUEUE}'...")

@@ -6,29 +6,55 @@ from psycopg2.extras import RealDictCursor
 import config
 import pickle
 from pathlib import Path
+import numpy as np
 
-# Live Inference Bridge: Load the Random Forest classifier at startup
-model = None
-model_path = None
+# Live Inference Bridge: Load the Random Forest classifiers at startup
+models = {"MCQ": None, "Code": None, "OCR": None}
+model_filenames = {
+    "MCQ": "telemetry_mcq_model.pkl",
+    "Code": "telemetry_code_model.pkl",
+    "OCR": "telemetry_ocr_model.pkl"
+}
+
 curr_dir = Path(__file__).resolve().parent
+models_dir = None
 for _ in range(5):
-    check_path = curr_dir / "models" / "telemetry_rf_v1.pkl"
-    if check_path.exists():
-        model_path = check_path
+    check_path = curr_dir / "models"
+    if check_path.exists() and (check_path / "telemetry_mcq_model.pkl").exists():
+        models_dir = check_path
+        break
+    # Check if we are inside the engine-python or similar peer folders
+    peer_path = curr_dir.parent / "models"
+    if peer_path.exists() and (peer_path / "telemetry_mcq_model.pkl").exists():
+        models_dir = peer_path
         break
     if curr_dir == curr_dir.parent:
         break
     curr_dir = curr_dir.parent
 
-if model_path:
-    try:
-        with open(model_path, "rb") as f:
-            model = pickle.load(f)
-        print(f"[ML Bridge] Successfully loaded Random Forest model from {model_path}")
-    except Exception as e:
-        print(f"[ML Bridge] Warning: Failed to load model from {model_path} ({e}). Falling back to rule-based simulation.")
+if models_dir:
+    for task_name, filename in model_filenames.items():
+        path = models_dir / filename
+        if path.exists():
+            try:
+                with open(path, "rb") as f:
+                    payload = pickle.load(f)
+                    if isinstance(payload, dict) and "model" in payload:
+                        models[task_name] = payload
+                        print(f"[ML Bridge] Successfully loaded {task_name} model payload from {path}")
+                    else:
+                        models[task_name] = {
+                            "model": payload,
+                            "scaler": None,
+                            "features": None
+                        }
+                        print(f"[ML Bridge] Loaded raw {task_name} model from {path}")
+            except Exception as e:
+                print(f"[ML Bridge] Warning: Failed to load {task_name} model from {path} ({e})")
+        else:
+            print(f"[ML Bridge] Warning: {filename} not found in {models_dir}")
 else:
-    print("[ML Bridge] Warning: telemetry_rf_v1.pkl not found in parent directory tree. Falling back to rule-based simulation.")
+    print("[ML Bridge] Warning: Models directory not found in parent directory tree. Falling back to rule-based simulation.")
 
 
 def calculate_variance(alpha: float, beta: float) -> float:
@@ -50,27 +76,108 @@ def calculate_expected_mastery(alpha: float, beta: float) -> float:
         return 0.5
     return alpha / total
 
-def classify_telemetry(time_spent_seconds: float, run_count: int, backspace_count: int, paste_char_count: int, syntax_error_count: int) -> int:
+def classify_telemetry(interaction_type: str, metrics: dict, is_correct: bool = True) -> str:
     """
-    Predicts student coding behavior:
-    0: Normal
-    1: Shotgun Debugging (high run count, low time)
-    2: Copy-Paste Dependency (high paste count, low backspace)
+    Predicts student behavioral class depending on the interaction_type:
+    - MCQ classes: BLIND_GUESSING, ACCIDENTAL_MISCLICK, THOROUGH_COMPREHENSION_BONUS
+    - Code classes: COPY_PASTE_DEPENDENCY, SHOTGUN_DEBUGGING, SYSTEMIC_STRUGGLE_REWARD, etc.
+    - OCR classes: FOUNDATIONAL_VOID, PROCEDURAL_FATIGUE
     """
-    if model is not None:
+    # Normalize interaction type
+    itype = "Code"
+    if interaction_type:
+        val = str(interaction_type).upper()
+        if "MCQ" in val:
+            itype = "MCQ"
+        elif "OCR" in val:
+            itype = "OCR"
+        elif "CODE" in val or "RUN" in val or "COMPILE" in val:
+            itype = "Code"
+
+    model_info = models.get(itype)
+    if model_info and model_info.get("model") is not None:
         try:
-            # Telemetry Data Mapping: Exact feature columns order used in training
-            prediction = model.predict([[time_spent_seconds, run_count, backspace_count, paste_char_count, syntax_error_count]])
-            return int(prediction[0])
-        except Exception as e:
-            print(f"[ML Bridge] Inference error: {e}. Falling back to rules.")
+            clf = model_info["model"]
+            scaler = model_info.get("scaler")
+            features = model_info.get("features")
             
-    # Fallback to rule-based classification if model is not loaded or fails
-    if paste_char_count > 30 and backspace_count < 2:
-        return 2  # Copy-Paste
-    if run_count > 4 and time_spent_seconds < 15:
-        return 1  # Shotgun Debugging
-    return 0  # Normal
+            input_vector = []
+            if features:
+                for f in features:
+                    if f == "is_correct":
+                        input_vector.append(1.0 if is_correct else 0.0)
+                    else:
+                        input_vector.append(float(metrics.get(f, 0.0)))
+            else:
+                # Fallbacks if features meta is absent
+                if itype == "MCQ":
+                    input_vector = [
+                        float(metrics.get("question_word_count", 50)),
+                        float(metrics.get("time_to_first_action_sec", 10)),
+                        float(metrics.get("reading_velocity", 3.0)),
+                        float(metrics.get("option_switch_count", 0)),
+                        float(metrics.get("minimum_click_interval_ms", 1000)),
+                        float(metrics.get("network_drop_duration_sec", 0.0)),
+                        float(metrics.get("total_time_spent_sec", 30)),
+                        1.0 if is_correct else 0.0
+                    ]
+                elif itype == "OCR":
+                    input_vector = [
+                        float(metrics.get("total_steps_detected", 5)),
+                        float(metrics.get("logical_break_step_index", 2)),
+                        float(metrics.get("erasure_scribble_ratio", 0.05)),
+                        float(metrics.get("spatial_density", 0.4)),
+                        float(metrics.get("time_since_last_upload_sec", 60)),
+                        1.0 if is_correct else 0.0
+                    ]
+                else: # Code
+                    input_vector = [
+                        float(metrics.get("time_spent_seconds", metrics.get("time_spent_sec", 30))),
+                        float(metrics.get("time_to_first_edit_sec", 5)),
+                        float(metrics.get("compile_count", metrics.get("run_count", 0))),
+                        float(metrics.get("syntax_error_ratio", 0.1)),
+                        float(metrics.get("runtime_error_ratio", 0.0)),
+                        float(metrics.get("paste_char_count", 0)),
+                        float(metrics.get("backspace_count", 0)),
+                        float(metrics.get("structural_grit_ratio", 1.0)),
+                        1.0 if is_correct else 0.0
+                    ]
+            
+            X_input = np.array([input_vector])
+            if scaler:
+                X_input = scaler.transform(X_input)
+                
+            prediction = clf.predict(X_input)
+            return str(prediction[0])
+            
+        except Exception as e:
+            print(f"[ML Bridge] Inference error for {itype}: {e}. Falling back to rules.")
+            
+    # Rule-based fallbacks
+    if itype == "MCQ":
+        time_spent = float(metrics.get("total_time_spent_sec", 30))
+        option_switches = int(metrics.get("option_switch_count", 0))
+        if time_spent < 5:
+            return "BLIND_GUESSING"
+        if option_switches > 3:
+            return "ACCIDENTAL_MISCLICK"
+        return "THOROUGH_COMPREHENSION_BONUS" if is_correct else "NORMAL_INCORRECT"
+    elif itype == "OCR":
+        erasure_ratio = float(metrics.get("erasure_scribble_ratio", 0.0))
+        if erasure_ratio > 0.1:
+            return "PROCEDURAL_FATIGUE"
+        return "FOUNDATIONAL_VOID"
+    else:  # Code
+        paste_char_count = int(metrics.get("paste_char_count", 0))
+        backspace_count = int(metrics.get("backspace_count", 0))
+        run_count = int(metrics.get("run_count", metrics.get("compile_count", 0)))
+        time_spent_seconds = float(metrics.get("time_spent_seconds", metrics.get("time_spent_sec", 30)))
+        
+        if paste_char_count > 30 and backspace_count < 2:
+            return "COPY_PASTE_DEPENDENCY"
+        if run_count > 4 and time_spent_seconds < 15:
+            return "SHOTGUN_DEBUGGING"
+        return "NORMAL"
 
 def process_cognitive_update(
     prior_alpha: float,
@@ -80,36 +187,49 @@ def process_cognitive_update(
     success: bool,
     behavioral_flags: list,
     influence_weight: float = 1.0,
-    telemetry_data: dict = None
+    telemetry_data: dict = None,
+    interaction_type: str = "Code"
 ) -> tuple:
     # 1. Apply Ebbinghaus forgetting decay
     decayed_alpha = apply_ebbinghaus_decay(prior_alpha, last_practiced_days, decay_rate)
     decayed_beta = prior_beta
 
-    # 2. Extract telemetry features
-    telemetry = telemetry_data or {}
-    time_spent = float(telemetry.get("time_spent_seconds", 30))
-    run_count = int(telemetry.get("run_count", 0))
-    backspace_count = int(telemetry.get("backspace_count", 0))
-    paste_count = int(telemetry.get("paste_char_count", 0))
-    syntax_errors = int(telemetry.get("syntax_error_count", 0))
-
-    # Run ML classifier
-    behavior_class = classify_telemetry(time_spent, run_count, backspace_count, paste_count, syntax_errors)
+    # 2. Run ML classifier
+    behavior_class = classify_telemetry(interaction_type, telemetry_data or {}, is_correct=success)
 
     # 3. Behavior-driven modifiers
     alpha_modifier = 0.0
     beta_modifier = 0.0
-
     learning_rate_modifier = 1.0
-    if behavior_class == 2:
+    
+    if behavior_class == "COPY_PASTE_DEPENDENCY":
         learning_rate_modifier = 0.1  # Copy-paste penalty
         if "COPY_PASTE_PRONE" not in behavioral_flags:
             behavioral_flags.append("COPY_PASTE_PRONE")
-    elif behavior_class == 1:
+    elif behavior_class == "SHOTGUN_DEBUGGING":
         learning_rate_modifier = 0.5  # Shotgun debugging penalty
         if "SHOTGUN_DEBUGGING" not in behavioral_flags:
             behavioral_flags.append("SHOTGUN_DEBUGGING")
+    elif behavior_class == "BLIND_GUESSING":
+        learning_rate_modifier = 0.2  # Blind guessing penalty
+        if "BLIND_GUESSING" not in behavioral_flags:
+            behavioral_flags.append("BLIND_GUESSING")
+    elif behavior_class == "PROCEDURAL_FATIGUE":
+        learning_rate_modifier = 0.4  # Procedural fatigue penalty
+        if "PROCEDURAL_FATIGUE" not in behavioral_flags:
+            behavioral_flags.append("PROCEDURAL_FATIGUE")
+    elif behavior_class == "FOUNDATIONAL_VOID":
+        learning_rate_modifier = 0.3  # Foundational gaps penalty
+        if "FOUNDATIONAL_VOID" not in behavioral_flags:
+            behavioral_flags.append("FOUNDATIONAL_VOID")
+    elif behavior_class == "THOROUGH_COMPREHENSION_BONUS":
+        learning_rate_modifier = 1.3  # Compenhsion reward
+        if "THOROUGH_COMPREHENSION" not in behavioral_flags:
+            behavioral_flags.append("THOROUGH_COMPREHENSION")
+    elif behavior_class == "SYSTEMIC_STRUGGLE_REWARD":
+        learning_rate_modifier = 1.2  # Reward for grit
+        if "SYSTEMIC_STRUGGLE_REWARD" not in behavioral_flags:
+            behavioral_flags.append("SYSTEMIC_STRUGGLE_REWARD")
 
     if "SYNTAX_HESITANT" in behavioral_flags:
         beta_modifier += 0.8
