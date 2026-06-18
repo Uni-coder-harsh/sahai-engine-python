@@ -194,40 +194,51 @@ def process_cognitive_update(
     decayed_alpha = apply_ebbinghaus_decay(prior_alpha, last_practiced_days, decay_rate)
     decayed_beta = prior_beta
 
-    # 2. Run ML classifier
-    behavior_class = classify_telemetry(interaction_type, telemetry_data or {}, is_correct=success)
+    # 2. Run ML classifier if telemetry_data is provided and has contents, otherwise default to "NORMAL"
+    if telemetry_data and len(telemetry_data) > 0:
+        predicted_behavior = classify_telemetry(interaction_type, telemetry_data, is_correct=success)
+    else:
+        predicted_behavior = "NORMAL"
 
-    # 3. Behavior-driven modifiers
+    # 3. Behavior-driven modifiers and integer mapping for backward compatibility
     alpha_modifier = 0.0
     beta_modifier = 0.0
     learning_rate_modifier = 1.0
-    
-    if behavior_class == "COPY_PASTE_DEPENDENCY":
-        learning_rate_modifier = 0.1  # Copy-paste penalty
-        if "COPY_PASTE_PRONE" not in behavioral_flags:
-            behavioral_flags.append("COPY_PASTE_PRONE")
-    elif behavior_class == "SHOTGUN_DEBUGGING":
+    behavior_class_int = 0  # Default: Normal (0)
+
+    # Map behavioral string output to proper metrics modifiers and integer class codes
+    if predicted_behavior in ["COPY_PASTE_DEPENDENCY", "BLIND_GUESSING", "FOUNDATIONAL_VOID", 2]:
+        learning_rate_modifier = 0.1  # Copy-paste / guess penalty
+        behavior_class_int = 2
+        if predicted_behavior == "COPY_PASTE_DEPENDENCY" or predicted_behavior == 2:
+            if "COPY_PASTE_PRONE" not in behavioral_flags:
+                behavioral_flags.append("COPY_PASTE_PRONE")
+        elif predicted_behavior == "BLIND_GUESSING":
+            if "BLIND_GUESSING" not in behavioral_flags:
+                behavioral_flags.append("BLIND_GUESSING")
+        elif predicted_behavior == "FOUNDATIONAL_VOID":
+            if "FOUNDATIONAL_VOID" not in behavioral_flags:
+                behavioral_flags.append("FOUNDATIONAL_VOID")
+                
+    elif predicted_behavior in ["SHOTGUN_DEBUGGING", "PROCEDURAL_FATIGUE", 1]:
         learning_rate_modifier = 0.5  # Shotgun debugging penalty
-        if "SHOTGUN_DEBUGGING" not in behavioral_flags:
-            behavioral_flags.append("SHOTGUN_DEBUGGING")
-    elif behavior_class == "BLIND_GUESSING":
-        learning_rate_modifier = 0.2  # Blind guessing penalty
-        if "BLIND_GUESSING" not in behavioral_flags:
-            behavioral_flags.append("BLIND_GUESSING")
-    elif behavior_class == "PROCEDURAL_FATIGUE":
-        learning_rate_modifier = 0.4  # Procedural fatigue penalty
-        if "PROCEDURAL_FATIGUE" not in behavioral_flags:
-            behavioral_flags.append("PROCEDURAL_FATIGUE")
-    elif behavior_class == "FOUNDATIONAL_VOID":
-        learning_rate_modifier = 0.3  # Foundational gaps penalty
-        if "FOUNDATIONAL_VOID" not in behavioral_flags:
-            behavioral_flags.append("FOUNDATIONAL_VOID")
-    elif behavior_class == "THOROUGH_COMPREHENSION_BONUS":
-        learning_rate_modifier = 1.3  # Compenhsion reward
+        behavior_class_int = 1
+        if predicted_behavior == "SHOTGUN_DEBUGGING" or predicted_behavior == 1:
+            if "SHOTGUN_DEBUGGING" not in behavioral_flags:
+                behavioral_flags.append("SHOTGUN_DEBUGGING")
+        elif predicted_behavior == "PROCEDURAL_FATIGUE":
+            if "PROCEDURAL_FATIGUE" not in behavioral_flags:
+                behavioral_flags.append("PROCEDURAL_FATIGUE")
+                
+    elif predicted_behavior == "THOROUGH_COMPREHENSION_BONUS":
+        learning_rate_modifier = 1.3  # Comprehension reward
+        behavior_class_int = 0
         if "THOROUGH_COMPREHENSION" not in behavioral_flags:
             behavioral_flags.append("THOROUGH_COMPREHENSION")
-    elif behavior_class == "SYSTEMIC_STRUGGLE_REWARD":
+            
+    elif predicted_behavior == "SYSTEMIC_STRUGGLE_REWARD":
         learning_rate_modifier = 1.2  # Reward for grit
+        behavior_class_int = 0
         if "SYSTEMIC_STRUGGLE_REWARD" not in behavioral_flags:
             behavioral_flags.append("SYSTEMIC_STRUGGLE_REWARD")
 
@@ -243,7 +254,7 @@ def process_cognitive_update(
     new_beta = decayed_beta + beta_modifier
     expected_mastery = calculate_expected_mastery(new_alpha, new_beta)
 
-    return new_alpha, new_beta, expected_mastery, behavior_class
+    return new_alpha, new_beta, expected_mastery, behavior_class_int
 
 def fetch_or_init_state(user_id: str, node_id: str, mongo_db, pg_conn) -> dict:
     col = mongo_db["student_cognitive_distributions"]
