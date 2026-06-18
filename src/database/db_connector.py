@@ -41,8 +41,14 @@ class DatabaseConnector:
 
     def connect_mongo(self):
         if not self.mongo_client:
-            self.mongo_client = MongoClient(config.MONGO_URI)
-            self.mongo_db = self.mongo_client.get_default_database()
+            client = MongoClient(config.MONGO_URI)
+            try:
+                # Attempt to retrieve database from URI, default to 'sahai' if not provided
+                db = client.get_default_database()
+            except Exception:
+                db = client['sahai']
+            self.mongo_client = client
+            self.mongo_db = db
         return self.mongo_db
 
     def close_all(self):
