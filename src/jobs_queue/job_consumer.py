@@ -239,9 +239,18 @@ New Mastery Mean: {expected_mastery:.4f}
         Extracts handwritten student code, retrieves context, performs LLM logical evaluation,
         logs data to MongoDB, and triggers Bayesian cognitive state updates.
         """
+        print("\n" + "="*80)
+        print("[DEVELOPER DEBUG] Received OCR_HANDWRITING telemetry payload.")
+        print(f"[DEVELOPER DEBUG] Event ID: {event.get('event_id')}")
+        print(f"[DEVELOPER DEBUG] User ID: {event.get('user_id')}")
+        print(f"[DEVELOPER DEBUG] Question ID: {event.get('question_id')}")
+        print(f"[DEVELOPER DEBUG] Input Node ID: {event.get('node_id')}")
+        image_base64 = event.get("image_base64")
+        print(f"[DEVELOPER DEBUG] Image uploaded: {'YES' if image_base64 else 'NO'} (Base64 length: {len(image_base64) if image_base64 else 0} chars)")
+        print("="*80)
+
         logger.info(f"Processing OCR Handwriting telemetry payload for user: {event.get('user_id')}")
         user_id = event["user_id"]
-        image_base64 = event.get("image_base64")
         node_id = event.get("node_id")
         question_id = event.get("question_id")
         
@@ -261,9 +270,15 @@ New Mastery Mean: {expected_mastery:.4f}
         # 1. Decode base64 and extract raw text code
         from models.ocr_handler import ocr_handler
         try:
+            print("[DEVELOPER DEBUG] Running OCR extraction pipeline...")
             extracted_text = ocr_handler.extract_code_from_image(image_base64)
+            if extracted_text:
+                print(f"[DEVELOPER DEBUG] OCR extraction status: SUCCESS (Length: {len(extracted_text)} characters)")
+            else:
+                print("[DEVELOPER DEBUG] OCR extraction status: FAILED (Empty string returned)")
         except Exception as ocr_err:
             error_msg = f"OCR raw extraction failed: {ocr_err}"
+            print(f"[DEVELOPER DEBUG] OCR extraction status: FAILED. Reason: {ocr_err}")
             logger.error(error_msg)
             # Log failure details to MongoDB
             self.mongo_db["ocr_handwriting_evaluations"].insert_one({
@@ -309,20 +324,29 @@ New Mastery Mean: {expected_mastery:.4f}
 
         # If no target node_id was explicitly provided, execute Hybrid Retrieval to find the most relevant concept node
         if not node_id and extracted_text:
-            logger.info("Executing Hybrid RAG Search to identify relevant Python topic...")
+            print("[DEVELOPER DEBUG] RAG system: No explicit Node ID provided. Running Hybrid RAG search...")
+            print(f"[DEVELOPER DEBUG] RAG Query text (extracted from OCR):\n{extracted_text}")
+            
             from rag.hybrid_searcher import hybrid_searcher
             search_results = hybrid_searcher.search(self.pg_conn, extracted_text, limit=1)
             if search_results:
                 node_id = search_results[0]["node_id"]
                 question_context["node_id"] = node_id
                 question_context["concept_name"] = search_results[0]["concept_name"]
-                logger.info(f"Hybrid RAG search resolved target concept: {node_id} ('{search_results[0]['concept_name']}')")
+                print(f"[DEVELOPER DEBUG] RAG search resolved target concept: '{node_id}' (Concept: '{search_results[0]['concept_name']}')")
             else:
                 node_id = "PY_SYNTAX_01"
                 question_context["node_id"] = node_id
                 question_context["concept_name"] = "Basic Indentation"
+                print(f"[DEVELOPER DEBUG] RAG search yielded no matches. Falling back to default node ID: '{node_id}'")
+        else:
+            if not extracted_text:
+                print("[DEVELOPER DEBUG] RAG system: Skipped RAG search (Extracted text is empty)")
+            else:
+                print(f"[DEVELOPER DEBUG] RAG system: Node ID already explicitly specified: '{node_id}'. Skipped hybrid search.")
 
         # 4. Perform LLM logical grading evaluation
+        print("[DEVELOPER DEBUG] Invoking LLM logic grader...")
         grade_result = ocr_handler.evaluate_logic_via_llm(
             extracted_text=extracted_text,
             question_context=question_context,
@@ -348,14 +372,18 @@ New Mastery Mean: {expected_mastery:.4f}
         }
         
         try:
+            print("[DEVELOPER DEBUG] Logging audit record to MongoDB...")
             self.mongo_db["ocr_handwriting_evaluations"].insert_one(audit_record)
+            print("[DEVELOPER DEBUG] MongoDB audit logging: SUCCESS")
             logger.info("OCR Handwriting logical grading audited to MongoDB ocr_handwriting_evaluations.")
         except Exception as audit_err:
+            print(f"[DEVELOPER DEBUG] MongoDB audit logging: FAILED. Reason: {audit_err}")
             logger.error(f"Failed to write OCR audit record to MongoDB: {audit_err}")
 
         # 6. Trigger cognitive belief update inside Bayesian knowledge network
         from models.bayesian_network import update_bayesian_network
         try:
+            print("[DEVELOPER DEBUG] Triggering Bayesian knowledge network belief update...")
             bn_result = update_bayesian_network(
                 user_id=user_id,
                 failed_node_id=failed_node_id,
@@ -366,10 +394,16 @@ New Mastery Mean: {expected_mastery:.4f}
                 pg_conn=self.pg_conn,
                 r_client=self.r_client
             )
+            print(f"[DEVELOPER DEBUG] Bayesian network update: SUCCESS. Result: {bn_result}")
             logger.info(f"Bayesian Network belief updated: {bn_result}")
         except Exception as bn_err:
+            print(f"[DEVELOPER DEBUG] Bayesian network update: FAILED. Reason: {bn_err}")
             logger.error(f"Bayesian Network update failure: {bn_err}")
             bn_result = {"success": False, "error": str(bn_err)}
+
+        print("\n" + "="*80)
+        print("[DEVELOPER DEBUG] OCR Handwriting evaluation payload processing COMPLETE.")
+        print("="*80 + "\n")
 
         return {
             "success": True,

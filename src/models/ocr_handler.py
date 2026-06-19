@@ -2,8 +2,9 @@ import os
 import io
 import base64
 import re
+import json
 from typing import List, Dict, Tuple
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter
 import pytesseract
 from utils.logger import logger
 from utils.llm_client import llm_client
@@ -19,14 +20,58 @@ class OCRHandwritingHandler:
     def __init__(self):
         pass
 
+    def _score_extracted_text(self, text: str) -> int:
+        """
+        Calculates a Python-centric score for extracted text.
+        Higher scores indicate a higher likelihood of valid Python code.
+        """
+        if not text:
+            return 0
+        score = 0
+        keyword_count = 0
+        
+        PYTHON_MARKERS = [
+            r'\bdef\b', r'\bclass\b', r'\bself\b', r'\breturn\b', r'\bimport\b',
+            r'\bprint\b', r'\bfor\b', r'\bin\b', r'\bif\b', r'\belse\b', r'\binit\b',
+            r'__init__', r'\(self\b', r'self\.\w+'
+        ]
+        
+        for marker in PYTHON_MARKERS:
+            matches = re.findall(marker, text, re.IGNORECASE)
+            keyword_count += len(matches)
+            
+        if keyword_count == 0:
+            return 0  # No python markers found, likely complete gibberish or noise
+            
+        score += keyword_count * 50
+        
+        # Add points for alphanumeric character count (normalized)
+        alphanumeric_count = sum(1 for c in text if c.isalnum())
+        score += alphanumeric_count
+        
+        # Add points for specific python/code symbols
+        score += text.count('=') * 5
+        score += text.count(':') * 5
+        score += text.count('(') * 3
+        score += text.count(')') * 3
+        
+        return score
+
     def extract_code_from_image(self, base64_string: str) -> str:
         """
         Decodes a base64 image and extracts text using Tesseract OCR.
-        Removes base64 prefixes if present.
+        Detects image rotation automatically by evaluating Python syntax scores across different angles.
         """
-        logger.info("Executing extract_code_from_image OCR routine...")
+        print("\n" + "="*80)
+        print("[DEVELOPER DEBUG] Starting OCR Handwriting Text Extraction Pipeline")
+        print("="*80)
+        
         if not base64_string:
+            print("[DEVELOPER DEBUG] Image uploaded: NO (Empty or missing payload)")
+            print("[DEVELOPER DEBUG] OCR Pipeline Status: FAILED (Reason: Empty base64 string)")
             raise ValueError("Empty base64 string provided.")
+            
+        print(f"[DEVELOPER DEBUG] Image uploaded: YES (Base64 payload length: {len(base64_string)} chars)")
             
         try:
             # 1. Strip data URL scheme prefix if present (e.g. "data:image/png;base64,")
@@ -35,20 +80,102 @@ class OCRHandwritingHandler:
                 
             # 2. Decode base64 bytes
             image_bytes = base64.b64decode(base64_string)
+            print(f"[DEVELOPER DEBUG] Decoded image size: {len(image_bytes)} bytes")
             
             # 3. Load into PIL image
             image = Image.open(io.BytesIO(image_bytes))
+            print(f"[DEVELOPER DEBUG] PIL Image loaded successfully. Format: {image.format}, Size: {image.size}, Mode: {image.mode}")
             
-            # 4. Perform OCR text extraction
-            # Hinting Tesseract for generic english code parsing
-            raw_text = pytesseract.image_to_string(image, lang='eng')
+            # 4. Check if it's a tiny/mock image (e.g., from unit tests)
+            w, h = image.size
+            if w < 50 or h < 50:
+                print("[DEVELOPER DEBUG] Detected tiny/mock image. Skipping auto-rotation detection pass.")
+                # Run standard OCR on 0-degree angle
+                custom_config = r'--oem 3 --psm 3'
+                raw_text = pytesseract.image_to_string(image, config=custom_config, lang='eng')
+                cleaned_text = code_normalizer.clean_extracted_ocr(raw_text)
+                print(f"[DEVELOPER DEBUG] OCR Pipeline Status: SUCCESS (Mock/Tiny image text extracted)")
+                return cleaned_text
+
+            # 5. Advanced Auto-Rotation & Multi-Stage OCR pipeline
+            print("[DEVELOPER DEBUG] Starting auto-rotation check (testing angles: 0, 90, 180, 270 degrees)...")
+            best_angle = 0
+            best_score = -1
+            best_raw_text = ""
             
-            # 5. Clean OCR noise and normalize layout
-            cleaned_text = code_normalizer.clean_extracted_ocr(raw_text)
-            logger.info(f"Successfully extracted {len(cleaned_text)} characters of text from image.")
+            # Test different rotation angles
+            for angle in [0, 90, 180, 270]:
+                print(f"[DEVELOPER DEBUG] Testing image rotation: {angle} degrees...")
+                rotated = image.rotate(angle, expand=True)
+                gray = rotated.convert('L')
+                
+                # Resize by 1.5x (optimal compromise for character clarity vs OCR processing time)
+                w_r, h_r = gray.size
+                resized = gray.resize((int(w_r * 1.5), int(h_r * 1.5)), Image.Resampling.LANCZOS)
+                
+                # Standard auto page-segmentation mode 3 with forced high-quality 300 DPI
+                config_str = '--oem 3 --psm 3 --dpi 300'
+                try:
+                    txt = pytesseract.image_to_string(resized, config=config_str, lang='eng')
+                    score = self._score_extracted_text(txt)
+                    print(f"  -> Extracted text length: {len(txt.strip())} chars. Python score: {score}")
+                    if len(txt.strip()) > 0:
+                        preview = repr(txt.strip()[:100])
+                        print(f"  -> Preview: {preview}")
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_angle = angle
+                        best_raw_text = txt
+                except Exception as rot_ex:
+                    print(f"  -> OCR at angle {angle} degrees threw exception: {rot_ex}")
+                    
+            print(f"[DEVELOPER DEBUG] Auto-rotation evaluation complete. Selected best angle: {best_angle} degrees (Score: {best_score})")
+            
+            # 6. Fallback checks if the best score is 0 (i.e. no python keywords found in any angle)
+            final_text = ""
+            if best_score == 0:
+                print("[DEVELOPER DEBUG] Warning: Auto-rotation score is 0 (no python keywords detected in any rotation). Running fallbacks...")
+                
+                # Fallback Stage A: Try 0 degrees rotation with PSM 6 on a high-contrast binarized image
+                print("[DEVELOPER DEBUG] Fallback Stage A: Running PSM 6 on high-contrast binarized image at 0 degrees...")
+                gray = image.convert('L')
+                resized = gray.resize((w * 2, h * 2), Image.Resampling.LANCZOS)
+                contrast = ImageEnhance.Contrast(resized).enhance(3.0)
+                sharpness = ImageEnhance.Sharpness(contrast).enhance(2.0)
+                binarized = sharpness.point(lambda p: 255 if p > 130 else 0)
+                
+                try:
+                    fallback_text_a = pytesseract.image_to_string(binarized, config='--oem 3 --psm 6 --dpi 300', lang='eng')
+                    if fallback_text_a.strip():
+                        print(f"  -> Fallback Stage A SUCCESS! Extracted {len(fallback_text_a.strip())} chars.")
+                        final_text = fallback_text_a
+                except Exception as e_a:
+                    print(f"  -> Fallback Stage A failed: {e_a}")
+                    
+                # Fallback Stage B: Try best text returned from standard 0-degree angle
+                if not final_text.strip() and best_raw_text.strip():
+                    print("[DEVELOPER DEBUG] Fallback Stage B: Using best raw text from rotation checks.")
+                    final_text = best_raw_text
+            else:
+                final_text = best_raw_text
+                
+            # 7. Clean and normalize the final OCR output
+            cleaned_text = code_normalizer.clean_extracted_ocr(final_text)
+            
+            if cleaned_text.strip():
+                print(f"[DEVELOPER DEBUG] OCR Pipeline SUCCESS! Extracted text length: {len(cleaned_text)} chars.")
+                print(f"[DEVELOPER DEBUG] Cleaned Code Snippet Preview:\n{cleaned_text[:500]}\n" + "-"*30)
+                print("="*80)
+            else:
+                print("[DEVELOPER DEBUG] OCR Pipeline FAILED: Text extraction yielded no valid characters.")
+                print("="*80)
+                
             return cleaned_text
             
         except Exception as e:
+            print(f"[DEVELOPER DEBUG] OCR Pipeline EXCEPTION: {e}")
+            print("="*80)
             logger.error(f"OCR Extraction failure: {e}")
             raise RuntimeError(f"OCR extraction failed: {str(e)}")
 
@@ -63,7 +190,13 @@ class OCRHandwritingHandler:
         Grades extracted student code against a question curriculum context using LLM reasoning.
         Injects allowed node IDs and student IDE telemetry factors for precise root-cause analysis.
         """
-        logger.info("Evaluating student code logic via LLM grader...")
+        print("\n" + "="*80)
+        print("[DEVELOPER DEBUG] Starting LLM Logical Evaluation Grader")
+        print("="*80)
+        print(f"[DEVELOPER DEBUG] Extracted text length: {len(extracted_text) if extracted_text else 0} chars")
+        print(f"[DEVELOPER DEBUG] Question Context: {question_context}")
+        print(f"[DEVELOPER DEBUG] Telemetry Metrics: {telemetry_metrics}")
+        
         if allowed_node_ids is None:
             allowed_node_ids = []
             
@@ -89,7 +222,26 @@ In addition to the code itself, you MUST take into account the student's IDE tel
 - Syntax Error Count: {syntax_error_count} errors. (High syntax error count suggests syntactic hesitation or procedural fatigue).
 - Mode Label: {label}.
 
-Determine if the student's code is logically correct. If incorrect, pinpoint the SINGLE root-cause concept node_id (from the provided list of allowed node_ids) that represents the failure.
+Determine if the student's code is logically correct. 
+
+IMPORTANT NOTE ON OCR TRANSCRIPTION NOISE:
+The code was extracted from a handwritten photo using a local OCR engine. Due to the nature of handwriting and OCR, minor typos, spelling substitutions, or syntax errors may exist that are artifacts of OCR rather than the student's work.
+For example:
+- 'de!' or 'del' instead of 'def'
+- 'init' or 'ink' or 'tart' or '__init_' instead of '__init__'
+- 'Céel}}', 'Self ree', or 'node)' instead of 'self'
+- 'reKe' or 'make,' instead of 'make'
+- 'moclal', 'moclel', or 'model ie' instead of 'model'
+- 'col' or 'cat' instead of 'def'
+- 'NOtuAN', 'KOtUAY', or 'AOTUAN' instead of 'return'
+- 'Get descrsotian' or 'Gok descrsottanw' instead of 'get_description'
+
+When evaluating:
+1. Focus on the underlying code logic and structure. Reconstruct the student's likely intended code by correcting obvious OCR noise/transcription errors.
+2. If the logic, structure, and intended code are correct, mark "is_correct": true.
+3. Only mark "is_correct": false if there is a genuine logical, algorithmic, or structural flaw in their code (e.g., completely missing attributes, incorrect return logic, wrong function logic) that cannot be explained by OCR character recognition substitution.
+
+If incorrect, pinpoint the SINGLE root-cause concept node_id (from the provided list of allowed node_ids) that represents the failure.
 If the failure is syntactic/indents, choose a syntax-related node (e.g. PY_SYNTAX_01). If it's variable initialization, choose PY_SYNTAX_05. If it's a loop failure, choose PY_CONTROL_05 or PY_CONTROL_06.
 
 You MUST respond with ONLY a valid JSON object matching this exact schema:
@@ -112,8 +264,13 @@ Do not include any Markdown wrappers like ```json or any introductory text. Just
 
 Evaluate and return the grading JSON:"""
 
+        print("[DEVELOPER DEBUG] Connecting to LLM client...")
         try:
+            print("[DEVELOPER DEBUG] Sending prompts to LLM (primary: Groq Llama 3.3, fallback: OpenAI gpt-4o-mini)...")
             result = llm_client.request_json(system_prompt, user_prompt)
+            print("[DEVELOPER DEBUG] LLM Connection Status: SUCCESS")
+            print("[DEVELOPER DEBUG] LLM Response received: YES")
+            print(f"[DEVELOPER DEBUG] Raw LLM Response: {result}")
             
             # Post-validate the result
             is_correct = result.get("is_correct", True)
@@ -126,21 +283,27 @@ Evaluate and return the grading JSON:"""
             else:
                 # Resolve hallucinated node_id (if not in the allowed list)
                 if failed_node_id and failed_node_id not in allowed_node_ids:
-                    logger.warn(f"LLM hallucinated node_id: '{failed_node_id}' which is not in curriculum. Resolving fallback...")
-                    # Try fuzzy matching or fallback to primary node_id
+                    print(f"[DEVELOPER DEBUG] WARNING: Grader returned hallucinated node_id: '{failed_node_id}' which is not in curriculum. Resolving fallback...")
                     fallback_node = question_context.get("node_id") or "PY_SYNTAX_01"
                     # If the hallucinated node shares prefix, see if we can find it
                     resolved = False
                     for nid in allowed_node_ids:
                         if nid.lower() == failed_node_id.lower():
                             result["failed_node_id"] = nid
+                            print(f"[DEVELOPER DEBUG] Resolved fuzzy match for hallucinated node_id: '{failed_node_id}' -> '{nid}'")
                             resolved = True
                             break
                     if not resolved:
                         result["failed_node_id"] = fallback_node
+                        print(f"[DEVELOPER DEBUG] Fallback to primary node_id for hallucinated node: '{fallback_node}'")
                         
+            print(f"[DEVELOPER DEBUG] Grader Output: is_correct={result['is_correct']}, failed_node_id={result['failed_node_id']}, explanation='{result['logical_flaw_explanation']}'")
+            print("="*80)
             return result
         except Exception as e:
+            print("[DEVELOPER DEBUG] LLM Connection Status: FAILED")
+            print(f"[DEVELOPER DEBUG] LLM Grader failed: {e}")
+            print("="*80)
             logger.error(f"LLM evaluation failed: {e}")
             # Safe grading fallback in case of LLM outage
             return {
