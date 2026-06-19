@@ -6,6 +6,7 @@ import json
 from typing import List, Dict, Tuple
 from PIL import Image, ImageEnhance, ImageFilter
 import pytesseract
+import requests
 from utils.logger import logger
 from utils.llm_client import llm_client
 from rag.normalizer import code_normalizer
@@ -57,10 +58,30 @@ class OCRHandwritingHandler:
         
         return score
 
+    def _clean_llm_ocr_output(self, text: str) -> str:
+        """
+        Removes reasoning blocks and markdown code block quotes from the LLM output.
+        """
+        if not text:
+            return ""
+        # Remove thinking/reasoning tags if any
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+        
+        text = text.strip()
+        # Clean markdown code blocks
+        if "```" in text:
+            match = re.search(r'```(?:python)?\s*(.*?)\s*```', text, re.DOTALL | re.IGNORECASE)
+            if match:
+                text = match.group(1)
+            else:
+                text = text.replace("```", "")
+        return text.strip()
+
     def extract_code_from_image(self, base64_string: str) -> str:
         """
-        Decodes a base64 image and extracts text using Tesseract OCR.
-        Detects image rotation automatically by evaluating Python syntax scores across different angles.
+        Decodes a base64 image and extracts text.
+        Primary: Groq Multimodal Vision OCR (qwen/qwen3.6-27b) for high-fidelity handwriting transcription.
+        Fallback: Local Tesseract OCR auto-rotation engine for offline resiliency.
         """
         print("\n" + "="*80)
         print("[DEVELOPER DEBUG] Starting OCR Handwriting Text Extraction Pipeline")
@@ -72,57 +93,108 @@ class OCRHandwritingHandler:
             raise ValueError("Empty base64 string provided.")
             
         print(f"[DEVELOPER DEBUG] Image uploaded: YES (Base64 payload length: {len(base64_string)} chars)")
+        
+        # Strip data URL scheme prefix if present
+        raw_base64 = base64_string
+        if "," in raw_base64:
+            raw_base64 = raw_base64.split(",", 1)[1]
             
+        # Try Groq Vision OCR first
+        groq_key = os.environ.get("GROQ_API_KEY")
+        if groq_key:
+            print("[DEVELOPER DEBUG] Stage 0: Attempting high-fidelity Vision OCR via Groq (qwen/qwen3.6-27b)...")
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {groq_key}"
+            }
+            payload = {
+                "model": "qwen/qwen3.6-27b",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Transcribe the handwritten Python code in this image. Return ONLY the raw Python code. Do not wrap it in markdown block quotes (no ```), do not include any introductions or explanations. Just return the pure code."
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{raw_base64}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 500,
+                "temperature": 0.1
+            }
+            
+            try:
+                # 20 second timeout for API response
+                response = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=20
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    content = result["choices"][0]["message"]["content"]
+                    cleaned_code = self._clean_llm_ocr_output(content)
+                    if cleaned_code:
+                        print("[DEVELOPER DEBUG] Groq Vision OCR Status: SUCCESS")
+                        print(f"[DEVELOPER DEBUG] Cleaned Code Snippet Preview:\n{cleaned_code[:500]}\n" + "-"*30)
+                        print("="*80)
+                        return cleaned_code
+                    else:
+                        print("[DEVELOPER DEBUG] Groq Vision OCR returned empty text content.")
+                else:
+                    print(f"[DEVELOPER DEBUG] Groq Vision API returned error status {response.status_code}: {response.text}")
+            except Exception as vision_ex:
+                print(f"[DEVELOPER DEBUG] Groq Vision API call threw exception: {vision_ex}")
+            
+            print("[DEVELOPER DEBUG] Groq Vision OCR failed/unavailable. Falling back to local Tesseract OCR engine...")
+        else:
+            print("[DEVELOPER DEBUG] GROQ_API_KEY not found in environment. Skipping Vision OCR and running local Tesseract OCR...")
+
+        # Fallback Local Tesseract OCR Pipeline
         try:
-            # 1. Strip data URL scheme prefix if present (e.g. "data:image/png;base64,")
-            if "," in base64_string:
-                base64_string = base64_string.split(",", 1)[1]
-                
-            # 2. Decode base64 bytes
-            image_bytes = base64.b64decode(base64_string)
+            # Decode base64 bytes
+            image_bytes = base64.b64decode(raw_base64)
             print(f"[DEVELOPER DEBUG] Decoded image size: {len(image_bytes)} bytes")
             
-            # 3. Load into PIL image
+            # Load into PIL image
             image = Image.open(io.BytesIO(image_bytes))
-            print(f"[DEVELOPER DEBUG] PIL Image loaded successfully. Format: {image.format}, Size: {image.size}, Mode: {image.mode}")
+            print(f"[DEVELOPER DEBUG] PIL Image loaded successfully. Size: {image.size}")
             
-            # 4. Check if it's a tiny/mock image (e.g., from unit tests)
+            # Check if it's a tiny/mock image (e.g., from unit tests)
             w, h = image.size
             if w < 50 or h < 50:
                 print("[DEVELOPER DEBUG] Detected tiny/mock image. Skipping auto-rotation detection pass.")
-                # Run standard OCR on 0-degree angle
                 custom_config = r'--oem 3 --psm 3'
                 raw_text = pytesseract.image_to_string(image, config=custom_config, lang='eng')
                 cleaned_text = code_normalizer.clean_extracted_ocr(raw_text)
                 print(f"[DEVELOPER DEBUG] OCR Pipeline Status: SUCCESS (Mock/Tiny image text extracted)")
                 return cleaned_text
 
-            # 5. Advanced Auto-Rotation & Multi-Stage OCR pipeline
             print("[DEVELOPER DEBUG] Starting auto-rotation check (testing angles: 0, 90, 180, 270 degrees)...")
             best_angle = 0
             best_score = -1
             best_raw_text = ""
             
-            # Test different rotation angles
             for angle in [0, 90, 180, 270]:
                 print(f"[DEVELOPER DEBUG] Testing image rotation: {angle} degrees...")
                 rotated = image.rotate(angle, expand=True)
                 gray = rotated.convert('L')
-                
-                # Resize by 1.5x (optimal compromise for character clarity vs OCR processing time)
                 w_r, h_r = gray.size
                 resized = gray.resize((int(w_r * 1.5), int(h_r * 1.5)), Image.Resampling.LANCZOS)
                 
-                # Standard auto page-segmentation mode 3 with forced high-quality 300 DPI
                 config_str = '--oem 3 --psm 3 --dpi 300'
                 try:
                     txt = pytesseract.image_to_string(resized, config=config_str, lang='eng')
                     score = self._score_extracted_text(txt)
                     print(f"  -> Extracted text length: {len(txt.strip())} chars. Python score: {score}")
-                    if len(txt.strip()) > 0:
-                        preview = repr(txt.strip()[:100])
-                        print(f"  -> Preview: {preview}")
-                    
                     if score > best_score:
                         best_score = score
                         best_angle = angle
@@ -132,35 +204,25 @@ class OCRHandwritingHandler:
                     
             print(f"[DEVELOPER DEBUG] Auto-rotation evaluation complete. Selected best angle: {best_angle} degrees (Score: {best_score})")
             
-            # 6. Fallback checks if the best score is 0 (i.e. no python keywords found in any angle)
             final_text = ""
             if best_score == 0:
-                print("[DEVELOPER DEBUG] Warning: Auto-rotation score is 0 (no python keywords detected in any rotation). Running fallbacks...")
-                
-                # Fallback Stage A: Try 0 degrees rotation with PSM 6 on a high-contrast binarized image
-                print("[DEVELOPER DEBUG] Fallback Stage A: Running PSM 6 on high-contrast binarized image at 0 degrees...")
+                print("[DEVELOPER DEBUG] Warning: Auto-rotation score is 0. Running fallback passes...")
                 gray = image.convert('L')
                 resized = gray.resize((w * 2, h * 2), Image.Resampling.LANCZOS)
                 contrast = ImageEnhance.Contrast(resized).enhance(3.0)
                 sharpness = ImageEnhance.Sharpness(contrast).enhance(2.0)
                 binarized = sharpness.point(lambda p: 255 if p > 130 else 0)
-                
                 try:
                     fallback_text_a = pytesseract.image_to_string(binarized, config='--oem 3 --psm 6 --dpi 300', lang='eng')
                     if fallback_text_a.strip():
-                        print(f"  -> Fallback Stage A SUCCESS! Extracted {len(fallback_text_a.strip())} chars.")
                         final_text = fallback_text_a
                 except Exception as e_a:
                     print(f"  -> Fallback Stage A failed: {e_a}")
-                    
-                # Fallback Stage B: Try best text returned from standard 0-degree angle
                 if not final_text.strip() and best_raw_text.strip():
-                    print("[DEVELOPER DEBUG] Fallback Stage B: Using best raw text from rotation checks.")
                     final_text = best_raw_text
             else:
                 final_text = best_raw_text
                 
-            # 7. Clean and normalize the final OCR output
             cleaned_text = code_normalizer.clean_extracted_ocr(final_text)
             
             if cleaned_text.strip():
@@ -170,7 +232,6 @@ class OCRHandwritingHandler:
             else:
                 print("[DEVELOPER DEBUG] OCR Pipeline FAILED: Text extraction yielded no valid characters.")
                 print("="*80)
-                
             return cleaned_text
             
         except Exception as e:

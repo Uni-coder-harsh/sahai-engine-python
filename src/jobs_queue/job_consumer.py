@@ -1,3 +1,5 @@
+import sys
+import io
 import json
 import time
 import threading
@@ -6,6 +8,33 @@ import redis
 import config
 from database.db_connector import db_connector
 from utils.logger import logger
+
+class DualStream:
+    def __init__(self, stream1, stream2):
+        self.stream1 = stream1
+        self.stream2 = stream2
+
+    def write(self, data):
+        self.stream1.write(data)
+        self.stream2.write(data)
+
+    def flush(self):
+        self.stream1.flush()
+        self.stream2.flush()
+
+class StdoutCapturer:
+    def __enter__(self):
+        self.old_stdout = sys.stdout
+        self.buffer = io.StringIO()
+        sys.stdout = DualStream(self.old_stdout, self.buffer)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        sys.stdout = self.old_stdout
+
+    def get_lines(self):
+        content = self.buffer.getvalue()
+        return [line for line in content.split('\n') if line.strip()]
 from models.bayesian_network import (
     fetch_or_init_state, 
     process_cognitive_update, 
@@ -238,10 +267,25 @@ New Mastery Mean: {expected_mastery:.4f}
         """
         Extracts handwritten student code, retrieves context, performs LLM logical evaluation,
         logs data to MongoDB, and triggers Bayesian cognitive state updates.
+        Captures all standard output prints during the pipeline execution and returns them in the response.
+        """
+        with StdoutCapturer() as capturer:
+            try:
+                result = self._internal_handle_ocr_handwriting_event(event)
+            except Exception as ex:
+                result = {"success": False, "error": str(ex)}
+            
+            result["developer_debug_logs"] = capturer.get_lines()
+            return result
+
+    def _internal_handle_ocr_handwriting_event(self, event: dict) -> dict:
+        """
+        Internal implementation of handwritten code extraction and logical grading.
         """
         print("\n" + "="*80)
         print("[DEVELOPER DEBUG] Received OCR_HANDWRITING telemetry payload.")
         print(f"[DEVELOPER DEBUG] Event ID: {event.get('event_id')}")
+
         print(f"[DEVELOPER DEBUG] User ID: {event.get('user_id')}")
         print(f"[DEVELOPER DEBUG] Question ID: {event.get('question_id')}")
         print(f"[DEVELOPER DEBUG] Input Node ID: {event.get('node_id')}")
