@@ -27,6 +27,15 @@ class TelemetryJobConsumer:
         self.mongo_db = db_connector.connect_mongo()
         self.cache_global_dag()
         
+        # Initialize RAG vector store and BM25 index on startup
+        try:
+            from rag.vector_store import vector_store
+            from rag.hybrid_searcher import hybrid_searcher
+            vector_store.populate_database_embeddings(self.pg_conn)
+            hybrid_searcher.initialize_bm25(self.pg_conn)
+        except Exception as startup_err:
+            logger.error(f"Error executing RAG startup indexing sequence: {startup_err}")
+            
         # Threading lock and status flag for on-demand queue processing
         self.lock = threading.Lock()
         self.is_processing = False
@@ -73,6 +82,10 @@ class TelemetryJobConsumer:
             logger.info("Raw telemetry payload logged to MongoDB raw_telemetry_logs.")
         except Exception as mongo_err:
             logger.error(f"Failed to log raw telemetry payload to MongoDB: {mongo_err}")
+
+        interaction_type = event.get("interaction_type", event.get("event_type", "Code"))
+        if interaction_type == "OCR_HANDWRITING":
+            return self.handle_ocr_handwriting_event(event)
 
         user_id = event["user_id"]
         node_id = event["node_id"]
@@ -219,6 +232,150 @@ New Mastery Mean: {expected_mastery:.4f}
             "expected_mastery": float(expected_mastery),
             "misconceptions_updated": misconceptions_updated,
             "propagations": propagations
+        }
+
+    def handle_ocr_handwriting_event(self, event: dict) -> dict:
+        """
+        Extracts handwritten student code, retrieves context, performs LLM logical evaluation,
+        logs data to MongoDB, and triggers Bayesian cognitive state updates.
+        """
+        logger.info(f"Processing OCR Handwriting telemetry payload for user: {event.get('user_id')}")
+        user_id = event["user_id"]
+        image_base64 = event.get("image_base64")
+        node_id = event.get("node_id")
+        question_id = event.get("question_id")
+        
+        # Normalize and extract metrics
+        telemetry_metrics = event.get("metrics", {})
+        if not telemetry_metrics:
+            # Extract standard metrics from root keys if they are at the top level
+            telemetry_metrics = {
+                "time_spent_sec": event.get("time_spent_sec", event.get("time_spent_seconds", 30)),
+                "run_count": event.get("run_count", 0),
+                "backspace_count": event.get("backspace_count", 0),
+                "paste_char_count": event.get("paste_char_count", 0),
+                "syntax_error_count": event.get("syntax_error_count", 0),
+                "label": event.get("label", "NORMAL")
+            }
+
+        # 1. Decode base64 and extract raw text code
+        from models.ocr_handler import ocr_handler
+        try:
+            extracted_text = ocr_handler.extract_code_from_image(image_base64)
+        except Exception as ocr_err:
+            error_msg = f"OCR raw extraction failed: {ocr_err}"
+            logger.error(error_msg)
+            # Log failure details to MongoDB
+            self.mongo_db["ocr_handwriting_evaluations"].insert_one({
+                "user_id": user_id,
+                "interaction_type": "OCR_HANDWRITING",
+                "timestamp": datetime.utcnow().isoformat() + 'Z',
+                "status": "FAILED_OCR",
+                "error": error_msg,
+                "telemetry_metrics": telemetry_metrics
+            })
+            return {"success": False, "error": error_msg}
+
+        # 2. Retrieve Allowed node_ids list
+        with self.pg_conn.cursor() as cur:
+            cur.execute("SELECT node_id FROM concept_nodes;")
+            allowed_node_ids = [row[0] for row in cur.fetchall()]
+
+        # 3. Retrieve curriculum and question context
+        question_context = {}
+        if node_id:
+            with self.pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT node_id, concept_name, difficulty_baseline FROM concept_nodes WHERE node_id = %s", 
+                    (node_id,)
+                )
+                row = cur.fetchone()
+                if row:
+                    question_context["node_id"] = row[0]
+                    question_context["concept_name"] = row[1]
+                    question_context["difficulty"] = float(row[2])
+
+        if question_id:
+            with self.pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, question_text, difficulty_level FROM questions WHERE id = %s", 
+                    (question_id,)
+                )
+                row = cur.fetchone()
+                if row:
+                    question_context["question_id"] = row[0]
+                    question_context["question_text"] = row[1]
+                    question_context["question_difficulty"] = float(row[2])
+
+        # If no target node_id was explicitly provided, execute Hybrid Retrieval to find the most relevant concept node
+        if not node_id and extracted_text:
+            logger.info("Executing Hybrid RAG Search to identify relevant Python topic...")
+            from rag.hybrid_searcher import hybrid_searcher
+            search_results = hybrid_searcher.search(self.pg_conn, extracted_text, limit=1)
+            if search_results:
+                node_id = search_results[0]["node_id"]
+                question_context["node_id"] = node_id
+                question_context["concept_name"] = search_results[0]["concept_name"]
+                logger.info(f"Hybrid RAG search resolved target concept: {node_id} ('{search_results[0]['concept_name']}')")
+            else:
+                node_id = "PY_SYNTAX_01"
+                question_context["node_id"] = node_id
+                question_context["concept_name"] = "Basic Indentation"
+
+        # 4. Perform LLM logical grading evaluation
+        grade_result = ocr_handler.evaluate_logic_via_llm(
+            extracted_text=extracted_text,
+            question_context=question_context,
+            telemetry_metrics=telemetry_metrics,
+            allowed_node_ids=allowed_node_ids
+        )
+
+        is_correct = grade_result.get("is_correct", False)
+        failed_node_id = grade_result.get("failed_node_id")
+        explanation = grade_result.get("logical_flaw_explanation")
+
+        # 5. Permanent Audit Log write to MongoDB
+        audit_record = {
+            "user_id": user_id,
+            "interaction_type": "OCR_HANDWRITING",
+            "timestamp": datetime.utcnow().isoformat() + 'Z',
+            "extracted_text": extracted_text,
+            "question_context": question_context,
+            "telemetry_metrics": telemetry_metrics,
+            "is_correct": is_correct,
+            "failed_node_id": failed_node_id,
+            "logical_flaw_explanation": explanation
+        }
+        
+        try:
+            self.mongo_db["ocr_handwriting_evaluations"].insert_one(audit_record)
+            logger.info("OCR Handwriting logical grading audited to MongoDB ocr_handwriting_evaluations.")
+        except Exception as audit_err:
+            logger.error(f"Failed to write OCR audit record to MongoDB: {audit_err}")
+
+        # 6. Trigger cognitive belief update inside Bayesian knowledge network
+        from models.bayesian_network import update_bayesian_network
+        try:
+            bn_result = update_bayesian_network(
+                user_id=user_id,
+                failed_node_id=failed_node_id,
+                is_correct=is_correct,
+                telemetry_metrics=telemetry_metrics,
+                primary_node_id=node_id,
+                mongo_db=self.mongo_db,
+                pg_conn=self.pg_conn,
+                r_client=self.r_client
+            )
+            logger.info(f"Bayesian Network belief updated: {bn_result}")
+        except Exception as bn_err:
+            logger.error(f"Bayesian Network update failure: {bn_err}")
+            bn_result = {"success": False, "error": str(bn_err)}
+
+        return {
+            "success": True,
+            "extracted_text": extracted_text,
+            "grade_result": grade_result,
+            "bayesian_update": bn_result
         }
 
     def trigger_processing(self):

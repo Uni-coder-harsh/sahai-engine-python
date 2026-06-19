@@ -32,3 +32,21 @@ logs/
 *.njsproj
 *.sln
 *.swp       
+
+# Python compilation and cache files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.cache/
+.coverage
+htmlcov/
+*.pkl
+*.model
+
+# Environments
+.env
+.venv
+venv/
+ENV/
+env/

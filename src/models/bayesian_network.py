@@ -461,3 +461,106 @@ def propagate_updates_up_dag(
             "expected_mastery": float(new_mastery)
         })
     return propagations_logged
+
+def update_bayesian_network(
+    user_id: str,
+    failed_node_id: str,
+    is_correct: bool,
+    telemetry_metrics: dict = None,
+    primary_node_id: str = None,
+    mongo_db = None,
+    pg_conn = None,
+    r_client = None
+) -> dict:
+    """
+    Exposes a unified interface to update the student cognitive belief states 
+    and propagate updates up the DAG. If correct, updates the primary concept node as successful.
+    If incorrect, updates the failed_node_id (if provided) or primary_node_id as failure.
+    """
+    from database.db_connector import db_connector
+    
+    if pg_conn is None:
+        pg_conn = db_connector.connect_postgres()
+    if mongo_db is None:
+        mongo_db = db_connector.connect_mongo()
+    if r_client is None:
+        r_client = db_connector.connect_redis()
+        
+    target_node = primary_node_id
+    if not is_correct and failed_node_id:
+        target_node = failed_node_id
+        
+    if not target_node:
+        target_node = failed_node_id or primary_node_id
+        
+    if not target_node:
+        raise ValueError("Could not determine cognitive node target for update (both primary_node_id and failed_node_id are empty).")
+        
+    # Load state
+    state = fetch_or_init_state(user_id, target_node, mongo_db, pg_conn)
+    prior_alpha = state["distribution"]["alpha"]
+    prior_beta = state["distribution"]["beta"]
+    
+    # Calculate time-decay elapsed days
+    last_practiced_str = state["temporal_factors"]["last_practiced"]
+    last_practiced_dt = datetime.fromisoformat(last_practiced_str.replace("Z", "+00:00"))
+    now = datetime.now(timezone.utc)
+    time_delta = (now - last_practiced_dt).total_seconds() / (24 * 3600.0)
+    last_practiced_days = max(0.0, time_delta)
+    
+    decay_rate = state["temporal_factors"].get("forgetting_curve_decay_rate", config.DEFAULT_DECAY_RATE)
+    
+    # Determine behavioral flags
+    behavioral_flags = []
+    if not is_correct:
+        behavioral_flags.append("LOGICAL_FLAW_DETECTED")
+    else:
+        behavioral_flags.append("OCR_GRADED_CORRECT")
+        
+    # Run cognitive updates
+    new_alpha, new_beta, expected_mastery, behavior_class = process_cognitive_update(
+        prior_alpha=prior_alpha,
+        prior_beta=prior_beta,
+        last_practiced_days=last_practiced_days,
+        decay_rate=decay_rate,
+        success=is_correct,
+        behavioral_flags=behavioral_flags,
+        influence_weight=1.0,
+        telemetry_data=telemetry_metrics,
+        interaction_type="OCR"
+    )
+    
+    # Save updated cognitive state
+    save_cognitive_state(
+        user_id=user_id,
+        node_id=target_node,
+        alpha=new_alpha,
+        beta=new_beta,
+        mastery=expected_mastery,
+        behavioral_flags=behavioral_flags,
+        last_practiced_dt=now,
+        mongo_db=mongo_db,
+        pg_conn=pg_conn
+    )
+    
+    # Propagate DAG updates
+    propagations = propagate_updates_up_dag(
+        user_id=user_id,
+        target_node=target_node,
+        success=is_correct,
+        event_timestamp=now,
+        mongo_db=mongo_db,
+        pg_conn=pg_conn,
+        r_client=r_client,
+        gamma=config.DEFAULT_GAMMA
+    )
+    
+    return {
+        "success": True,
+        "target_node": target_node,
+        "new_alpha": float(new_alpha),
+        "new_beta": float(new_beta),
+        "expected_mastery": float(expected_mastery),
+        "propagations": propagations
+    }
+
