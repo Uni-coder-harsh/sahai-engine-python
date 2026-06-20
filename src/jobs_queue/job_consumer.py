@@ -237,6 +237,12 @@ New Mastery Mean: {expected_mastery:.4f}
 ==================================================
 """)
         
+        tutor_feedback = None
+        if not success:
+            language = event.get("language", "en")
+            failed_node = misconceptions[0]["node_id"] if misconceptions else node_id
+            tutor_feedback = generate_empathetic_feedback(failed_node, language, self.pg_conn)
+
         # Commit updated distribution to Postgres and Mongo
         save_cognitive_state(
             user_id=user_id,
@@ -247,7 +253,8 @@ New Mastery Mean: {expected_mastery:.4f}
             behavioral_flags=behavioral_flags,
             last_practiced_dt=event_timestamp,
             mongo_db=self.mongo_db,
-            pg_conn=self.pg_conn
+            pg_conn=self.pg_conn,
+            tutor_feedback=tutor_feedback
         )
         logger.info(f"Saved Node: {node_id} (Mastery: {expected_mastery:.4f})")
         
@@ -305,12 +312,6 @@ New Mastery Mean: {expected_mastery:.4f}
             r_client=self.r_client,
             gamma=config.DEFAULT_GAMMA
         )
-
-        tutor_feedback = None
-        if not success:
-            language = event.get("language", "en")
-            failed_node = misconceptions[0]["node_id"] if misconceptions else node_id
-            tutor_feedback = generate_empathetic_feedback(failed_node, language, self.pg_conn)
 
         return {
             "success": True,
