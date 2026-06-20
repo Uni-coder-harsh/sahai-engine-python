@@ -320,6 +320,17 @@ def fetch_or_init_state(user_id: str, node_id: str, mongo_db, pg_conn) -> dict:
     
     col.insert_one(new_doc)
     
+    # Also log history snapshot
+    mongo_db["student_cognitive_distribution"].insert_one({
+        "user_id": user_id,
+        "node_id": node_id,
+        "temporal_factors": {
+            "last_practiced": now_str,
+            "current_adjusted_mastery": 0.50
+        },
+        "behavioral_flags": []
+    })
+    
     with pg_conn.cursor() as cur:
         cur.execute(
             """
@@ -342,7 +353,8 @@ def save_cognitive_state(
     behavioral_flags: list,
     last_practiced_dt: datetime,
     mongo_db,
-    pg_conn
+    pg_conn,
+    tutor_feedback: dict = None
 ):
     col = mongo_db["student_cognitive_distributions"]
     variance = calculate_variance(alpha, beta)
@@ -367,6 +379,18 @@ def save_cognitive_state(
         },
         upsert=True
     )
+    
+    # Also log history snapshot
+    mongo_db["student_cognitive_distribution"].insert_one({
+        "user_id": user_id,
+        "node_id": node_id,
+        "temporal_factors": {
+            "last_practiced": last_practiced_dt.isoformat(),
+            "current_adjusted_mastery": float(mastery)
+        },
+        "behavioral_flags": list(behavioral_flags),
+        "tutor_feedback": tutor_feedback
+    })
     
     with pg_conn.cursor() as cur:
         cur.execute(
@@ -475,7 +499,8 @@ def update_bayesian_network(
     primary_node_id: str = None,
     mongo_db = None,
     pg_conn = None,
-    r_client = None
+    r_client = None,
+    tutor_feedback: dict = None
 ) -> dict:
     """
     Exposes a unified interface to update the student cognitive belief states 
@@ -545,7 +570,8 @@ def update_bayesian_network(
         behavioral_flags=behavioral_flags,
         last_practiced_dt=now,
         mongo_db=mongo_db,
-        pg_conn=pg_conn
+        pg_conn=pg_conn,
+        tutor_feedback=tutor_feedback
     )
     
     # Propagate DAG updates

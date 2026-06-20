@@ -35,6 +35,61 @@ class StdoutCapturer:
     def get_lines(self):
         content = self.buffer.getvalue()
         return [line for line in content.split('\n') if line.strip()]
+def get_concept_name(pg_conn, node_id):
+    if not node_id:
+        return "Coding Concept"
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute("SELECT concept_name FROM concept_nodes WHERE node_id = %s", (node_id,))
+            row = cur.fetchone()
+            if row:
+                return row[0]
+    except Exception as e:
+        logger.error(f"Error fetching concept name for {node_id}: {e}")
+    return node_id
+
+def generate_empathetic_feedback(failed_node_id, language, pg_conn):
+    concept_name = get_concept_name(pg_conn, failed_node_id)
+    
+    system_prompt = (
+        "Act as an empathetic, world-class tutor. "
+        "You MUST respond with ONLY a valid JSON object matching this exact schema:\n"
+        '{\n  "feedback_en": "Your tutoring feedback in English",\n'
+        '  "feedback_hi": "Your tutoring feedback in natural, conversational Hindi (using Devanagari script). Keep technical terms (like \'Variable Scope\' or \'For Loop\') in English, but explain the concepts in Hindi."\n'
+        '}\n'
+        "Do not include any Markdown wrappers like ```json or any introductory text. Just output raw JSON."
+    )
+    
+    if language == "hi":
+        system_prompt += (
+            "\nCRITICAL INSTRUCTION: Translate your entire explanation and feedback into natural, conversational Hindi (using Devanagari script). "
+            "Keep technical terms (like 'Variable Scope' or 'For Loop') in English, but explain the concepts in Hindi."
+        )
+        
+    user_prompt = (
+        f"The student answered a question incorrectly. Our Bayesian Engine traced the root cause of their failure to the concept: {concept_name}. "
+        f"Act as an empathetic, world-class tutor. Briefly explain why their logic failed and gently encourage them to review {concept_name}."
+    )
+    
+    from utils.llm_client import llm_client
+    try:
+        result = llm_client.request_json(system_prompt, user_prompt)
+        feedback_en = result.get("feedback_en", "")
+        feedback_hi = result.get("feedback_hi", "")
+        if not feedback_en and not feedback_hi:
+            feedback_en = result.get("feedback", f"It seems you had some trouble with {concept_name}. Let's review this concept together to build a stronger foundation.")
+            feedback_hi = feedback_en
+        return {
+            "en": feedback_en,
+            "hi": feedback_hi
+        }
+    except Exception as e:
+        logger.error(f"Failed to generate empathetic feedback: {e}")
+        fallback_msg = f"It seems you had some trouble with {concept_name}. Let's review this concept together to build a stronger foundation."
+        return {
+            "en": fallback_msg,
+            "hi": fallback_msg
+        }
 from models.bayesian_network import (
     fetch_or_init_state, 
     process_cognitive_update, 
@@ -251,6 +306,12 @@ New Mastery Mean: {expected_mastery:.4f}
             gamma=config.DEFAULT_GAMMA
         )
 
+        tutor_feedback = None
+        if not success:
+            language = event.get("language", "en")
+            failed_node = misconceptions[0]["node_id"] if misconceptions else node_id
+            tutor_feedback = generate_empathetic_feedback(failed_node, language, self.pg_conn)
+
         return {
             "success": True,
             "user_id": user_id,
@@ -260,7 +321,8 @@ New Mastery Mean: {expected_mastery:.4f}
             "beta": float(new_beta),
             "expected_mastery": float(expected_mastery),
             "misconceptions_updated": misconceptions_updated,
-            "propagations": propagations
+            "propagations": propagations,
+            "tutor_feedback": tutor_feedback
         }
 
     def handle_ocr_handwriting_event(self, event: dict) -> dict:
@@ -404,6 +466,14 @@ New Mastery Mean: {expected_mastery:.4f}
         failed_node_id = grade_result.get("failed_node_id")
         explanation = grade_result.get("logical_flaw_explanation")
 
+        tutor_feedback = None
+        if not is_correct:
+            failed_node = failed_node_id or node_id or "PY_SYNTAX_01"
+            tutor_feedback = generate_empathetic_feedback(failed_node, language, self.pg_conn)
+            if tutor_feedback:
+                explanation = tutor_feedback.get("hi") if language == "hi" else tutor_feedback.get("en")
+                grade_result["logical_flaw_explanation"] = explanation
+
         # 5. Permanent Audit Log write to MongoDB
         audit_record = {
             "user_id": user_id,
@@ -426,6 +496,37 @@ New Mastery Mean: {expected_mastery:.4f}
             print(f"[DEVELOPER DEBUG] MongoDB audit logging: FAILED. Reason: {audit_err}")
             logger.error(f"Failed to write OCR audit record to MongoDB: {audit_err}")
 
+        # Insert into user_handwriting_responses PostgreSQL table
+        try:
+            print("[DEVELOPER DEBUG] Logging handwriting response to PostgreSQL user_handwriting_responses...")
+            time_spent_sec = telemetry_metrics.get("time_spent_sec", telemetry_metrics.get("time_spent_seconds", 30))
+            with self.pg_conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO user_handwriting_responses (
+                        user_id, question_id, ocr_extracted_text, llm_logical_flaw, failed_node_id, is_correct, time_spent_seconds, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, NOW());
+                    """,
+                    (
+                        user_id,
+                        question_id,
+                        extracted_text,
+                        explanation if not is_correct else None,
+                        failed_node_id if not is_correct else None,
+                        is_correct,
+                        time_spent_sec
+                    )
+                )
+                self.pg_conn.commit()
+            print("[DEVELOPER DEBUG] PostgreSQL user_handwriting_responses log: SUCCESS")
+        except Exception as pg_err:
+            print(f"[DEVELOPER DEBUG] PostgreSQL user_handwriting_responses log: FAILED. Reason: {pg_err}")
+            logger.error(f"Failed to write to user_handwriting_responses table: {pg_err}")
+            try:
+                self.pg_conn.rollback()
+            except:
+                pass
+
         # 6. Trigger cognitive belief update inside Bayesian knowledge network
         from models.bayesian_network import update_bayesian_network
         try:
@@ -438,7 +539,8 @@ New Mastery Mean: {expected_mastery:.4f}
                 primary_node_id=node_id,
                 mongo_db=self.mongo_db,
                 pg_conn=self.pg_conn,
-                r_client=self.r_client
+                r_client=self.r_client,
+                tutor_feedback=tutor_feedback
             )
             print(f"[DEVELOPER DEBUG] Bayesian network update: SUCCESS. Result: {bn_result}")
             logger.info(f"Bayesian Network belief updated: {bn_result}")
@@ -455,7 +557,8 @@ New Mastery Mean: {expected_mastery:.4f}
             "success": True,
             "extracted_text": extracted_text,
             "grade_result": grade_result,
-            "bayesian_update": bn_result
+            "bayesian_update": bn_result,
+            "tutor_feedback": tutor_feedback
         }
 
     def trigger_processing(self):
