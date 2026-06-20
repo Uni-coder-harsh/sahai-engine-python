@@ -238,22 +238,22 @@ def process_cognitive_update(
 
     # Map behavioral string output to proper metrics modifiers and integer class codes
     if predicted_behavior == "COPY_PASTE_DEPENDENCY" or predicted_behavior == 2:
-        learning_rate_modifier = 0.1  # Copy-paste penalty
+        learning_rate_modifier = 0.5  # Copy-paste penalty (reduced from 0.35)
         behavior_class_int = 2
         if "COPY_PASTE_PRONE" not in behavioral_flags:
             behavioral_flags.append("COPY_PASTE_PRONE")
     elif predicted_behavior == "BLIND_GUESSING" or predicted_behavior == 3:
-        learning_rate_modifier = 0.1  # Guess penalty
+        learning_rate_modifier = 0.5  # Guess penalty (reduced from 0.35)
         behavior_class_int = 3
         if "BLIND_GUESSING" not in behavioral_flags:
             behavioral_flags.append("BLIND_GUESSING")
     elif predicted_behavior == "FOUNDATIONAL_VOID" or predicted_behavior == 4:
-        learning_rate_modifier = 0.1  # Foundational void penalty
+        learning_rate_modifier = 0.5  # Foundational void penalty (reduced from 0.35)
         behavior_class_int = 4
         if "FOUNDATIONAL_VOID" not in behavioral_flags:
             behavioral_flags.append("FOUNDATIONAL_VOID")
     elif predicted_behavior in ["SHOTGUN_DEBUGGING", "PROCEDURAL_FATIGUE", 1]:
-        learning_rate_modifier = 0.5  # Shotgun debugging penalty
+        learning_rate_modifier = 0.8  # Shotgun debugging penalty (reduced from 0.7)
         behavior_class_int = 1
         if predicted_behavior == "SHOTGUN_DEBUGGING" or predicted_behavior == 1:
             if "SHOTGUN_DEBUGGING" not in behavioral_flags:
@@ -262,7 +262,7 @@ def process_cognitive_update(
             if "PROCEDURAL_FATIGUE" not in behavioral_flags:
                 behavioral_flags.append("PROCEDURAL_FATIGUE")
     elif predicted_behavior in ["AMBIGUOUS_ANXIOUS_LEARNER", "ANXIOUS_OVERWORKING", "ACCIDENTAL_MISCLICK", 5]:
-        learning_rate_modifier = 0.8  # Anxious overworking/misclick has smaller penalty
+        learning_rate_modifier = 0.95  # Anxious overworking/misclick penalty (reduced from 0.9)
         behavior_class_int = 5
         if "ANXIOUS_OVERWORKING" not in behavioral_flags:
             behavioral_flags.append("ANXIOUS_OVERWORKING")
