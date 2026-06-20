@@ -237,19 +237,21 @@ def process_cognitive_update(
     behavior_class_int = 0  # Default: Normal (0)
 
     # Map behavioral string output to proper metrics modifiers and integer class codes
-    if predicted_behavior in ["COPY_PASTE_DEPENDENCY", "BLIND_GUESSING", "FOUNDATIONAL_VOID", 2]:
-        learning_rate_modifier = 0.1  # Copy-paste / guess penalty
+    if predicted_behavior == "COPY_PASTE_DEPENDENCY" or predicted_behavior == 2:
+        learning_rate_modifier = 0.1  # Copy-paste penalty
         behavior_class_int = 2
-        if predicted_behavior == "COPY_PASTE_DEPENDENCY" or predicted_behavior == 2:
-            if "COPY_PASTE_PRONE" not in behavioral_flags:
-                behavioral_flags.append("COPY_PASTE_PRONE")
-        elif predicted_behavior == "BLIND_GUESSING":
-            if "BLIND_GUESSING" not in behavioral_flags:
-                behavioral_flags.append("BLIND_GUESSING")
-        elif predicted_behavior == "FOUNDATIONAL_VOID":
-            if "FOUNDATIONAL_VOID" not in behavioral_flags:
-                behavioral_flags.append("FOUNDATIONAL_VOID")
-                
+        if "COPY_PASTE_PRONE" not in behavioral_flags:
+            behavioral_flags.append("COPY_PASTE_PRONE")
+    elif predicted_behavior == "BLIND_GUESSING" or predicted_behavior == 3:
+        learning_rate_modifier = 0.1  # Guess penalty
+        behavior_class_int = 3
+        if "BLIND_GUESSING" not in behavioral_flags:
+            behavioral_flags.append("BLIND_GUESSING")
+    elif predicted_behavior == "FOUNDATIONAL_VOID" or predicted_behavior == 4:
+        learning_rate_modifier = 0.1  # Foundational void penalty
+        behavior_class_int = 4
+        if "FOUNDATIONAL_VOID" not in behavioral_flags:
+            behavioral_flags.append("FOUNDATIONAL_VOID")
     elif predicted_behavior in ["SHOTGUN_DEBUGGING", "PROCEDURAL_FATIGUE", 1]:
         learning_rate_modifier = 0.5  # Shotgun debugging penalty
         behavior_class_int = 1
@@ -259,13 +261,16 @@ def process_cognitive_update(
         elif predicted_behavior == "PROCEDURAL_FATIGUE":
             if "PROCEDURAL_FATIGUE" not in behavioral_flags:
                 behavioral_flags.append("PROCEDURAL_FATIGUE")
-                
+    elif predicted_behavior in ["AMBIGUOUS_ANXIOUS_LEARNER", "ANXIOUS_OVERWORKING", "ACCIDENTAL_MISCLICK", 5]:
+        learning_rate_modifier = 0.8  # Anxious overworking/misclick has smaller penalty
+        behavior_class_int = 5
+        if "ANXIOUS_OVERWORKING" not in behavioral_flags:
+            behavioral_flags.append("ANXIOUS_OVERWORKING")
     elif predicted_behavior == "THOROUGH_COMPREHENSION_BONUS":
         learning_rate_modifier = 1.3  # Comprehension reward
         behavior_class_int = 0
         if "THOROUGH_COMPREHENSION" not in behavioral_flags:
             behavioral_flags.append("THOROUGH_COMPREHENSION")
-            
     elif predicted_behavior == "SYSTEMIC_STRUGGLE_REWARD":
         learning_rate_modifier = 1.2  # Reward for grit
         behavior_class_int = 0
