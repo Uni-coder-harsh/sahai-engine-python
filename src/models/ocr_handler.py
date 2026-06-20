@@ -245,7 +245,8 @@ class OCRHandwritingHandler:
         extracted_text: str, 
         question_context: dict, 
         telemetry_metrics: dict = None, 
-        allowed_node_ids: List[str] = None
+        allowed_node_ids: List[str] = None,
+        language: str = "en"
     ) -> dict:
         """
         Grades extracted student code against a question curriculum context using LLM reasoning.
@@ -313,6 +314,9 @@ You MUST respond with ONLY a valid JSON object matching this exact schema:
 }}
 Do not include any Markdown wrappers like ```json or any introductory text. Just output raw JSON.
 """
+
+        if language == "hi":
+            system_prompt += "\nCRITICAL INSTRUCTION: Translate your entire explanation and feedback into natural, conversational Hindi (using Devanagari script). Keep technical terms (like 'Variable Scope' or 'For Loop') in English, but explain the concepts in Hindi.\n"
 
         user_prompt = f"""--- GRADED CURRICULUM NODE IDS ---
 {allowed_nodes_formatted}

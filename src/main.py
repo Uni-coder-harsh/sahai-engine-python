@@ -21,6 +21,10 @@ class TelemetryHTTPHandler(BaseHTTPRequestHandler):
             try:
                 event = json.loads(post_data.decode('utf-8'))
                 
+                # Extract language from header as fallback
+                if "language" not in event or not event["language"]:
+                    event["language"] = self.headers.get("X-App-Language", "en")
+                
                 # Relocate/Process the event using the consumer logic
                 result = {"success": True}
                 if consumer:

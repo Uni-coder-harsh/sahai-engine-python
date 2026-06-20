@@ -391,11 +391,13 @@ New Mastery Mean: {expected_mastery:.4f}
 
         # 4. Perform LLM logical grading evaluation
         print("[DEVELOPER DEBUG] Invoking LLM logic grader...")
+        language = event.get("language", "en")
         grade_result = ocr_handler.evaluate_logic_via_llm(
             extracted_text=extracted_text,
             question_context=question_context,
             telemetry_metrics=telemetry_metrics,
-            allowed_node_ids=allowed_node_ids
+            allowed_node_ids=allowed_node_ids,
+            language=language
         )
 
         is_correct = grade_result.get("is_correct", False)
