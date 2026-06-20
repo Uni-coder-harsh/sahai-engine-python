@@ -69,7 +69,7 @@ def test_copy_paste_dependency_handling():
     )
     # behavior_class should be 2 (Copy-Paste)
     assert behavior_class == 2
-    # alpha gets +0.1 (discounts 90%)
-    assert alpha == 1.1
+    # alpha gets +0.5 (discounts 50%)
+    assert alpha == 1.5
     assert beta == 1.0
-    assert mastery == 1.1 / 2.1
+    assert mastery == 1.5 / 2.5
