@@ -391,7 +391,6 @@ def save_cognitive_state(
         "behavioral_flags": list(behavioral_flags),
         "tutor_feedback": tutor_feedback
     })
-    
     with pg_conn.cursor() as cur:
         cur.execute(
             """
@@ -406,7 +405,6 @@ def save_cognitive_state(
             """,
             (user_id, node_id, float(alpha), float(beta), float(mastery), last_practiced_dt)
         )
-        pg_conn.commit()
 
 def propagate_updates_up_dag(
     user_id: str,
@@ -585,6 +583,13 @@ def update_bayesian_network(
         r_client=r_client,
         gamma=config.DEFAULT_GAMMA
     )
+    
+    try:
+        pg_conn.commit()
+        print("[OCR] Successfully committed transaction to PostgreSQL.")
+    except Exception as commit_err:
+        print(f"[OCR] Failed to commit transaction: {commit_err}")
+        pg_conn.rollback()
     
     return {
         "success": True,

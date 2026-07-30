@@ -48,8 +48,15 @@ def get_concept_name(pg_conn, node_id):
         logger.error(f"Error fetching concept name for {node_id}: {e}")
     return node_id
 
+# Global in-memory cache for generated tutoring feedback to eliminate LLM network latency on repeat failures
+FEEDBACK_CACHE = {}
+
 def generate_empathetic_feedback(failed_node_id, language, pg_conn):
     concept_name = get_concept_name(pg_conn, failed_node_id)
+    cache_key = (failed_node_id, language)
+    if cache_key in FEEDBACK_CACHE:
+        logger.info(f"Feedback cache HIT for concept: {failed_node_id} ({language})")
+        return FEEDBACK_CACHE[cache_key]
     
     system_prompt = (
         "Act as an empathetic, world-class tutor. "
@@ -79,17 +86,22 @@ def generate_empathetic_feedback(failed_node_id, language, pg_conn):
         if not feedback_en and not feedback_hi:
             feedback_en = result.get("feedback", f"It seems you had some trouble with {concept_name}. Let's review this concept together to build a stronger foundation.")
             feedback_hi = feedback_en
-        return {
+        
+        feedback_obj = {
             "en": feedback_en,
             "hi": feedback_hi
         }
+        FEEDBACK_CACHE[cache_key] = feedback_obj
+        return feedback_obj
     except Exception as e:
         logger.error(f"Failed to generate empathetic feedback: {e}")
         fallback_msg = f"It seems you had some trouble with {concept_name}. Let's review this concept together to build a stronger foundation."
-        return {
+        feedback_obj = {
             "en": fallback_msg,
             "hi": fallback_msg
         }
+        FEEDBACK_CACHE[cache_key] = feedback_obj
+        return feedback_obj
 from models.bayesian_network import (
     fetch_or_init_state, 
     process_cognitive_update, 
@@ -312,6 +324,13 @@ New Mastery Mean: {expected_mastery:.4f}
             r_client=self.r_client,
             gamma=config.DEFAULT_GAMMA
         )
+
+        try:
+            self.pg_conn.commit()
+            logger.info("Successfully committed transaction to PostgreSQL.")
+        except Exception as commit_err:
+            logger.error(f"Failed to commit transaction: {commit_err}")
+            self.pg_conn.rollback()
 
         return {
             "success": True,
