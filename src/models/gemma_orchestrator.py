@@ -18,28 +18,36 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 GEMMA_OLLAMA_URL = os.getenv("GEMMA_OLLAMA_URL", "http://localhost:11434")
 
 # Client Factory
-def get_llm_client() -> tuple[OpenAI, str, bool]:
+def get_llm_client(force_ollama: bool = False) -> tuple[OpenAI, str, bool]:
     """
     Returns (client, model_name, is_vllm).
-    Degrades to local Ollama if OpenRouter key is not defined.
+    Degrades to local Ollama if OpenRouter key is not defined or force_ollama is True.
     """
-    if OPENROUTER_API_KEY:
-        logger.info(f"Initializing OpenRouter client pointing to: {OPENROUTER_API_URL}")
-        client = OpenAI(
-            base_url=OPENROUTER_API_URL,
-            api_key=OPENROUTER_API_KEY,
-            default_headers={
-                "HTTP-Referer": "https://sahai.edu",
-                "X-Title": "SahAI Cognitive Diagnostics"
-            }
-        )
-        return client, "google/gemma-4-26b-a4b-it:free", True
-    else:
-        logger.info("No OpenRouter API key provided. Falling back to local Ollama.")
+    if OPENROUTER_API_KEY and not force_ollama:
+        try:
+            logger.info(f"Initializing OpenRouter client pointing to: {OPENROUTER_API_URL}")
+            client = OpenAI(
+                base_url=OPENROUTER_API_URL,
+                api_key=OPENROUTER_API_KEY,
+                default_headers={
+                    "HTTP-Referer": "https://sahai.edu",
+                    "X-Title": "SahAI Cognitive Diagnostics"
+                }
+            )
+            return client, "google/gemma-4-26b-a4b-it:free", True
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenRouter client: {e}. Falling back to Ollama.")
+            
+    logger.info("Using local Ollama fallback client.")
+    try:
         client = OpenAI(
             base_url=f"{GEMMA_OLLAMA_URL}/v1",
             api_key="ollama"
         )
+        return client, "codegemma:2b", False
+    except Exception as e:
+        logger.error(f"Failed to initialize Ollama client: {e}.")
+        client = OpenAI(api_key="dummy", base_url="http://localhost:11434/v1")
         return client, "codegemma:2b", False
 
 # ==========================================
@@ -56,7 +64,7 @@ def get_student_cognitive_state(user_id: str, node_id: str) -> Dict[str, Any]:
         pg_conn = db_connector.connect_postgres()
         with pg_conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT node_id, alpha, beta, expected_mastery, decay_rate FROM user_cognitive_states WHERE user_id = %s AND node_id = %s;",
+                "SELECT node_id, alpha, beta, expected_mastery FROM user_cognitive_states WHERE user_id = %s AND node_id = %s;",
                 (user_id, node_id)
             )
             row = cur.fetchone()
@@ -66,7 +74,7 @@ def get_student_cognitive_state(user_id: str, node_id: str) -> Dict[str, Any]:
                     "alpha": float(row["alpha"]),
                     "beta": float(row["beta"]),
                     "expected_mastery": float(row["expected_mastery"]),
-                    "decay_rate": float(row["decay_rate"])
+                    "decay_rate": 0.01
                 }
             
         # If no row exists, initialize state using BKT module
@@ -82,6 +90,10 @@ def get_student_cognitive_state(user_id: str, node_id: str) -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Error in get_student_cognitive_state: {e}")
+        try:
+            pg_conn.rollback()
+        except:
+            pass
         return {"error": str(e)}
 
 def execute_code_sandbox(source_code: str, language_id: int = 71) -> Dict[str, Any]:
@@ -261,112 +273,118 @@ def run_orchestration_loop(user_id: str, node_id: str, prompt_context: str, imag
     Step-by-step Socratic Diagnostic Orchestration Loop.
     Executes native function-calling cycles up to 5 iterations.
     """
-    client, model_name, is_vllm = get_llm_client()
-    
-    system_prompt = (
-        "You are SahAI's Lead Diagnostic Educational Agent. Your goal is to trace root-cause misconceptions. "
-        "You MUST use available tools to inspect the student's mastery state and code execution before forming a conclusion. "
-        "Always provide feedback in a Socratic tone (asking guiding questions) in both English and conversational Hindi. "
-        "You must return your FINAL answer as a single, valid JSON block matching this structure EXACTLY. "
-        "Do NOT output markdown wrapper blocks like ```json ... ```, just return the raw JSON object string:\n"
-        "{\n"
-        '  "status": "SUCCESS",\n'
-        '  "detected_misconception": "Brief description of error pattern",\n'
-        '  "behavioral_summary": "Notes on compiled behavior",\n'
-        '  "root_cause_node": "Target concept code",\n'
-        '  "socratic_hint_en": "Hint in English asking questions",\n'
-        '  "socratic_hint_hi": "Conversational Hindi hint using Hinglish terms",\n'
-        '  "recommended_next_node": "Alternative practice topic concept node ID",\n'
-        '  "tools_executed": ["list of tools used"]\n'
-        "}"
-    )
-
-    # Initialize messages list
-    messages = [{"role": "system", "content": system_prompt}]
-    
-    # Multimodal image processing using standard OpenAI content structure
-    if image_base64:
-        user_content = [
-            {"type": "text", "text": f"Student Query Context: {prompt_context}\nTarget Concept Node: {node_id}"},
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/jpeg;base64,{image_base64}"
-                }
-            }
-        ]
-    else:
-        user_content = f"Student Query Context: {prompt_context}\nTarget Concept Node: {node_id}"
-        
-    messages.append({"role": "user", "content": user_content})
-    
     tools_run_history = []
-    
-    # Loop execution up to 5 iterations
-    for iteration in range(5):
-        logger.info(f"Agentic loop iteration {iteration + 1}/5 (Model: {model_name})")
+    try:
+        client, model_name, is_vllm = get_llm_client()
         
-        try:
-            # We enforce 15s limit for vLLM calls, fallback client has standard timeout
-            timeout_limit = 15 if is_vllm else 30
-            
-            # Ollama / Local fallback might not accept tool definitions.
-            # We omit tools if using Ollama to avoid compatibility validation crashes.
-            call_params = {
-                "model": model_name,
-                "messages": messages,
-                "temperature": 0.1,
-                "timeout": timeout_limit
-            }
-            if is_vllm:
-                call_params["tools"] = openai_tools
-                call_params["response_format"] = {"type": "json_object"}
-            
-            response = client.chat.completions.create(**call_params)
-            choice = response.choices[0]
-            msg = choice.message
-            
-            # Check for tool execution requests
-            if hasattr(msg, "tool_calls") and msg.tool_calls:
-                messages.append(msg) # append agent response
-                
-                for tool_call in msg.tool_calls:
-                    name = tool_call.function.name
-                    args = json.loads(tool_call.function.arguments)
-                    tools_run_history.append(name)
-                    
-                    # Execute tool call and append to messages history
-                    tool_output = execute_local_tool(name, args)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": name,
-                        "content": tool_output
-                    })
-                # Proceed to next iteration with tool outcomes
-                continue
-            
-            # No tool calls returned: parse text completion outcome
-            final_text = msg.content or ""
-            return parse_structured_output(final_text, tools_run_history, node_id)
-            
-        except Exception as e:
-            logger.warn(f"Orchestration call failed in iteration {iteration + 1}: {e}")
-            if is_vllm:
-                logger.info("Degrading to local Ollama fallback for final response generation...")
-                # Instantly fallback to local Ollama
-                client, model_name, is_vllm = get_llm_client() # resets model to Ollama
-                # Remove tool calls references from messages history to compile correctly on codegemma
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Context: {prompt_context}. System failed. Respond directly."}
-                ]
-            else:
-                # If Ollama also fails, break loop
-                break
+        system_prompt = (
+            "You are SahAI's Lead Diagnostic Educational Agent. Your goal is to trace root-cause misconceptions. "
+            "You MUST use available tools to inspect the student's mastery state and code execution before forming a conclusion. "
+            "Always provide feedback in a Socratic tone (asking guiding questions) in both English and conversational Hindi. "
+            "You must return your FINAL answer as a single, valid JSON block matching this structure EXACTLY. "
+            "Do NOT output markdown wrapper blocks like ```json ... ```, just return the raw JSON object string:\n"
+            "{\n"
+            '  "status": "SUCCESS",\n'
+            '  "detected_misconception": "Brief description of error pattern",\n'
+            '  "behavioral_summary": "Notes on compiled behavior",\n'
+            '  "root_cause_node": "Target concept code",\n'
+            '  "socratic_hint_en": "Hint in English asking questions",\n'
+            '  "socratic_hint_hi": "Conversational Hindi hint using Hinglish terms",\n'
+            '  "recommended_next_node": "Alternative practice topic concept node ID",\n'
+            '  "tools_executed": ["list of tools used"]\n'
+            "}"
+        )
 
-    # Safe fallback if loop exhausts or completely fails
-    return build_safe_fallback_response(node_id, tools_run_history)
+        # Initialize messages list
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        # Multimodal image processing using standard OpenAI content structure
+        if image_base64:
+            # Strip data:image prefix if present to normalize base64
+            cleaned_base64 = image_base64
+            if "," in image_base64:
+                cleaned_base64 = image_base64.split(",")[1]
+            user_content = [
+                {"type": "text", "text": f"Student Query Context: {prompt_context}\nTarget Concept Node: {node_id}"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{cleaned_base64}"
+                    }
+                }
+            ]
+        else:
+            user_content = f"Student Query Context: {prompt_context}\nTarget Concept Node: {node_id}"
+            
+        messages.append({"role": "user", "content": user_content})
+        
+        # Loop execution up to 5 iterations
+        for iteration in range(5):
+            logger.info(f"Agentic loop iteration {iteration + 1}/5 (Model: {model_name})")
+            
+            try:
+                # We enforce 15s limit for vLLM calls, fallback client has standard timeout
+                timeout_limit = 15 if is_vllm else 30
+                
+                # Ollama / Local fallback might not accept tool definitions.
+                # We omit tools if using Ollama to avoid compatibility validation crashes.
+                call_params = {
+                    "model": model_name,
+                    "messages": messages,
+                    "temperature": 0.1,
+                    "timeout": timeout_limit
+                }
+                if is_vllm:
+                    call_params["tools"] = openai_tools
+                
+                response = client.chat.completions.create(**call_params)
+                choice = response.choices[0]
+                msg = choice.message
+                
+                # Check for tool execution requests
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    messages.append(msg) # append agent response
+                    
+                    for tool_call in msg.tool_calls:
+                        name = tool_call.function.name
+                        args = json.loads(tool_call.function.arguments)
+                        tools_run_history.append(name)
+                        
+                        # Execute tool call and append to messages history
+                        tool_output = execute_local_tool(name, args)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "name": name,
+                            "content": tool_output
+                        })
+                    # Proceed to next iteration with tool outcomes
+                    continue
+                
+                # No tool calls returned: parse text completion outcome
+                final_text = msg.content or ""
+                return parse_structured_output(final_text, tools_run_history, node_id)
+                
+            except Exception as e:
+                logger.warn(f"Orchestration call failed in iteration {iteration + 1}: {e}")
+                if is_vllm:
+                    logger.info("Degrading to local Ollama fallback for final response generation...")
+                    # Instantly fallback to local Ollama with force_ollama=True
+                    client, model_name, is_vllm = get_llm_client(force_ollama=True)
+                    # Remove tool calls references from messages history to compile correctly
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"Context: {prompt_context}. System failed. Respond directly."}
+                    ]
+                else:
+                    # If Ollama also fails, break loop
+                    break
+
+        # Safe fallback if loop exhausts or completes without returning
+        return build_safe_fallback_response(node_id, tools_run_history)
+    except Exception as fatal_err:
+        logger.error(f"Fatal error in run_orchestration_loop: {fatal_err}", exc_info=True)
+        return build_safe_fallback_response(node_id, tools_run_history)
 
 def parse_structured_output(raw_text: str, tools_run: List[str], concept_node: str) -> Dict[str, Any]:
     """Robust parser that handles cleaning backticks and fills missing keys safely."""
