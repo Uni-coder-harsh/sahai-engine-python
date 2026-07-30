@@ -18,8 +18,9 @@ class DatabaseConnector:
             url = config.REDIS_URL
             kwargs = {"socket_keepalive": True}
             if url and url.startswith("redis://"):
-                url = url.replace("redis://", "rediss://", 1)
-                kwargs["ssl_cert_reqs"] = None
+                if "localhost" not in url and "127.0.0.1" not in url and "//redis" not in url:
+                    url = url.replace("redis://", "rediss://", 1)
+                    kwargs["ssl_cert_reqs"] = None
             elif url and url.startswith("rediss://"):
                 kwargs["ssl_cert_reqs"] = None
             self.redis_client = redis.from_url(url, **kwargs)
