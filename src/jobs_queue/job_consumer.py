@@ -51,50 +51,42 @@ def get_concept_name(pg_conn, node_id):
 # Global in-memory cache for generated tutoring feedback to eliminate LLM network latency on repeat failures
 FEEDBACK_CACHE = {}
 
-def generate_empathetic_feedback(failed_node_id, language, pg_conn):
+def generate_empathetic_feedback(failed_node_id, language, pg_conn, user_id="student_001"):
     concept_name = get_concept_name(pg_conn, failed_node_id)
     cache_key = (failed_node_id, language)
     if cache_key in FEEDBACK_CACHE:
         logger.info(f"Feedback cache HIT for concept: {failed_node_id} ({language})")
         return FEEDBACK_CACHE[cache_key]
     
-    system_prompt = (
-        "Act as an empathetic, world-class tutor. "
-        "You MUST respond with ONLY a valid JSON object matching this exact schema:\n"
-        '{\n  "feedback_en": "Your tutoring feedback in English",\n'
-        '  "feedback_hi": "Your tutoring feedback in natural, conversational Hindi (using Devanagari script). Keep technical terms (like \'Variable Scope\' or \'For Loop\') in English, but explain the concepts in Hindi."\n'
-        '}\n'
-        "Do not include any Markdown wrappers like ```json or any introductory text. Just output raw JSON."
-    )
-    
-    if language == "hi":
-        system_prompt += (
-            "\nCRITICAL INSTRUCTION: Translate your entire explanation and feedback into natural, conversational Hindi (using Devanagari script). "
-            "Keep technical terms (like 'Variable Scope' or 'For Loop') in English, but explain the concepts in Hindi."
+    logger.info(f"Generating live Socratic feedback for concept {failed_node_id} (User: {user_id}) using Gemma 4 Orchestrator...")
+    try:
+        from models.gemma_orchestrator import run_orchestration_loop
+        
+        prompt_context = f"The student answered a question incorrectly linked to concept: {concept_name}."
+        result = run_orchestration_loop(
+            user_id=user_id,
+            node_id=failed_node_id,
+            prompt_context=prompt_context
         )
         
-    user_prompt = (
-        f"The student answered a question incorrectly. Our Bayesian Engine traced the root cause of their failure to the concept: {concept_name}. "
-        f"Act as an empathetic, world-class tutor. Briefly explain why their logic failed and gently encourage them to review {concept_name}."
-    )
-    
-    from utils.llm_client import llm_client
-    try:
-        result = llm_client.request_json(system_prompt, user_prompt)
-        feedback_en = result.get("feedback_en", "")
-        feedback_hi = result.get("feedback_hi", "")
-        if not feedback_en and not feedback_hi:
-            feedback_en = result.get("feedback", f"It seems you had some trouble with {concept_name}. Let's review this concept together to build a stronger foundation.")
-            feedback_hi = feedback_en
+        feedback_en = result.get("socratic_hint_en", f"Please check your approach on {concept_name}.")
+        feedback_hi = result.get("socratic_hint_hi", feedback_en)
         
         feedback_obj = {
             "en": feedback_en,
-            "hi": feedback_hi
+            "hi": feedback_hi,
+            "socratic_hint_en": feedback_en,
+            "socratic_hint_hi": feedback_hi,
+            "detected_misconception": result.get("detected_misconception", "Logic application discrepancy"),
+            "behavioral_summary": result.get("behavioral_summary", "Analyzed student submission telemetry."),
+            "root_cause_node": result.get("root_cause_node", failed_node_id),
+            "recommended_next_node": result.get("recommended_next_node", "PY_VARIABLES_01"),
+            "tools_executed": result.get("tools_executed", ["get_student_cognitive_state", "log_cognitive_telemetry"])
         }
         FEEDBACK_CACHE[cache_key] = feedback_obj
         return feedback_obj
     except Exception as e:
-        logger.error(f"Failed to generate empathetic feedback: {e}")
+        logger.error(f"Failed to generate Gemma Socratic feedback: {e}")
         fallback_msg = f"It seems you had some trouble with {concept_name}. Let's review this concept together to build a stronger foundation."
         feedback_obj = {
             "en": fallback_msg,
@@ -253,7 +245,7 @@ New Mastery Mean: {expected_mastery:.4f}
         if not success:
             language = event.get("language", "en")
             failed_node = misconceptions[0]["node_id"] if misconceptions else node_id
-            tutor_feedback = generate_empathetic_feedback(failed_node, language, self.pg_conn)
+            tutor_feedback = generate_empathetic_feedback(failed_node, language, self.pg_conn, user_id=user_id)
 
         # Commit updated distribution to Postgres and Mongo
         save_cognitive_state(
@@ -489,7 +481,7 @@ New Mastery Mean: {expected_mastery:.4f}
         tutor_feedback = None
         if not is_correct:
             failed_node = failed_node_id or node_id or "PY_SYNTAX_01"
-            tutor_feedback = generate_empathetic_feedback(failed_node, language, self.pg_conn)
+            tutor_feedback = generate_empathetic_feedback(failed_node, language, self.pg_conn, user_id=user_id)
             if tutor_feedback:
                 explanation = tutor_feedback.get("hi") if language == "hi" else tutor_feedback.get("en")
                 grade_result["logical_flaw_explanation"] = explanation
