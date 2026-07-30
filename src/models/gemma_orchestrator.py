@@ -13,25 +13,29 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Config & Environment variables
-RUNPOD_VLLM_URL = os.getenv("RUNPOD_VLLM_URL", "")
-RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY", "")
+OPENROUTER_API_URL = os.getenv("OPENROUTER_API_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 GEMMA_OLLAMA_URL = os.getenv("GEMMA_OLLAMA_URL", "http://localhost:11434")
 
 # Client Factory
 def get_llm_client() -> tuple[OpenAI, str, bool]:
     """
     Returns (client, model_name, is_vllm).
-    Degrades to local Ollama if vLLM endpoint is not defined.
+    Degrades to local Ollama if OpenRouter key is not defined.
     """
-    if RUNPOD_VLLM_URL:
-        logger.info(f"Initializing vLLM client pointing to RunPod: {RUNPOD_VLLM_URL}")
+    if OPENROUTER_API_KEY:
+        logger.info(f"Initializing OpenRouter client pointing to: {OPENROUTER_API_URL}")
         client = OpenAI(
-            base_url=RUNPOD_VLLM_URL,
-            api_key=RUNPOD_API_KEY or "dummy_key"
+            base_url=OPENROUTER_API_URL,
+            api_key=OPENROUTER_API_KEY,
+            default_headers={
+                "HTTP-Referer": "https://sahai.edu",
+                "X-Title": "SahAI Cognitive Diagnostics"
+            }
         )
-        return client, "google/gemma-4-26b-a4b-it", True
+        return client, "google/gemma-4-26b-a4b-it:free", True
     else:
-        logger.info("No RunPod URL provided. Falling back to local Ollama.")
+        logger.info("No OpenRouter API key provided. Falling back to local Ollama.")
         client = OpenAI(
             base_url=f"{GEMMA_OLLAMA_URL}/v1",
             api_key="ollama"

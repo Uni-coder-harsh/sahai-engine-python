@@ -54,6 +54,38 @@ class TelemetryHTTPHandler(BaseHTTPRequestHandler):
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode('utf-8'))
+        elif self.path == "/gemma-diagnose":
+            content_length = int(self.headers['Content-Length'])
+            post_data = self.rfile.read(content_length)
+            try:
+                payload = json.loads(post_data.decode('utf-8'))
+                user_id = payload.get("user_id")
+                node_id = payload.get("node_id")
+                submission_type = payload.get("submission_type")
+                content = payload.get("content")
+                image_base64 = payload.get("image_base64")
+                
+                from models.gemma_orchestrator import run_orchestration_loop
+                
+                context_str = f"Submission Type: {submission_type}\nContent: {content}"
+                
+                result = run_orchestration_loop(
+                    user_id=user_id,
+                    node_id=node_id,
+                    prompt_context=context_str,
+                    image_base64=image_base64
+                )
+                
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(result).encode('utf-8'))
+            except Exception as e:
+                logger.error(f"Error in /gemma-diagnose endpoint: {e}")
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode('utf-8'))
         else:
             self.send_response(404)
             self.end_headers()
