@@ -462,12 +462,16 @@ Title: {title}
 Tags: {tags_str}
 Description: {description[:1200]}
 
-Here is the complete list of SahAI internal Concept Node IDs:
+Here is the complete list of SahAI internal Concept Node IDs and their concept names:
 [{concepts_str}]
 
-Task: Identify the 3 to 5 most relevant SahAI node IDs that this coding problem evaluates.
-Format Requirement: Return ONLY a raw JSON array of strings containing the matched Node IDs. Do not write explanation, code, markdown format, or notes.
-Example output format:
+Task:
+Perform a deep semantic alignment. Analyze the core algorithms, data structures, bitwise operators, and logical use cases tested in this coding problem.
+Match them to the most relevant SahAI internal Concept Nodes. Do NOT just match by exact name. Think about the underlying concept (e.g., if a problem uses frequency counting, it maps to Dictionary/Hash Table concepts; if it uses element iteration, it maps to Loops and Arrays; if it uses XOR logic, it maps to Bitwise Operators).
+
+Identify the 3 to 5 most relevant SahAI node IDs.
+Format Requirement: Return ONLY a raw JSON array of strings containing the matched Node IDs. Do not write explanations, code, markdown tags, or notes.
+Example output:
 ["HASH_TABLE_01", "ARRAY_01"]
 """
 
