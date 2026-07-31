@@ -429,3 +429,85 @@ def evaluate_multimodal_submission(user_id: str, node_id: str, image_base64: str
     if code_snippet:
         context += f"\nCode uploaded: {code_snippet}"
     return run_orchestration_loop(user_id, node_id, context, image_base64)
+
+def map_leetcode_to_sahai(title: str, tags: list, description: str) -> List[str]:
+    """
+    Leverages Gemma 4 as a Curriculum Architect to dynamically map LeetCode tags
+    and problem description to the most relevant SahAI concept node IDs.
+    """
+    logger.info(f"[Gemma Map] Dynamically mapping problem: {title}")
+    
+    # 1. Fetch available concept nodes from PostgreSQL
+    concept_list = []
+    try:
+        import db_connector
+        pg_conn = db_connector.connect_postgres()
+        with pg_conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT node_id, concept_name FROM concept_nodes;")
+            rows = cur.fetchall()
+            for r in rows:
+                concept_list.append(f"{r['node_id']} ({r['concept_name']})")
+    except Exception as e:
+        logger.error(f"[Gemma Map] Failed to fetch concept nodes from postgres: {e}")
+        # Fallback list if postgres fetch fails
+        concept_list = ["PY_SYNTAX_01 (Python Syntax)", "PY_OOP_01 (OOP Basics)", "HASH_TABLE_01 (Hash Tables)", "ARRAY_01 (Arrays)"]
+
+    concepts_str = ", ".join(concept_list)
+    tags_str = ", ".join(tags) if tags else "None"
+
+    # 2. Formulate Prompt
+    system_prompt = "You are a Curriculum Architect for a computer science DSA tutor platform."
+    user_prompt = f"""You are given a coding problem:
+Title: {title}
+Tags: {tags_str}
+Description: {description[:1200]}
+
+Here is the complete list of SahAI internal Concept Node IDs:
+[{concepts_str}]
+
+Task: Identify the 3 to 5 most relevant SahAI node IDs that this coding problem evaluates.
+Format Requirement: Return ONLY a raw JSON array of strings containing the matched Node IDs. Do not write explanation, code, markdown format, or notes.
+Example output format:
+["HASH_TABLE_01", "ARRAY_01"]
+"""
+
+    # 3. Call LLM (using client factory)
+    try:
+        client, model, is_vllm = get_llm_client()
+        logger.info(f"[Gemma Map] Using LLM Model: {model} for problem mapping")
+        
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.1,
+            max_tokens=150
+        )
+        
+        raw_output = response.choices[0].message.content.strip()
+        logger.info(f"[Gemma Map] LLM raw response: {raw_output}")
+        
+        # Strip markdown code blocks if any
+        if raw_output.startswith("```"):
+            lines = raw_output.splitlines()
+            if len(lines) > 2:
+                raw_output = "\n".join(lines[1:-1]).strip()
+            else:
+                raw_output = raw_output.replace("```json", "").replace("```", "").strip()
+
+        # Parse JSON
+        mapped_nodes = json.loads(raw_output)
+        if isinstance(mapped_nodes, list):
+            # Clean and filter to ensure only valid returned strings
+            cleaned_nodes = [str(node).strip() for node in mapped_nodes]
+            logger.info(f"[Gemma Map] Successfully mapped nodes: {cleaned_nodes}")
+            return cleaned_nodes
+        else:
+            raise ValueError("LLM did not return a JSON list")
+            
+    except Exception as e:
+        logger.error(f"[Gemma Map] Error mapping problem via LLM: {e}")
+        # Return fallback node if mapping failed
+        return ["PY_SYNTAX_01"]

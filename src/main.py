@@ -86,6 +86,29 @@ class TelemetryHTTPHandler(BaseHTTPRequestHandler):
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode('utf-8'))
+        elif self.path == "/gemma-map-problem":
+            content_length = int(self.headers['Content-Length'])
+            post_data = self.rfile.read(content_length)
+            try:
+                payload = json.loads(post_data.decode('utf-8'))
+                title = payload.get("title", "")
+                tags = payload.get("tags", [])
+                description = payload.get("description", "")
+                
+                from models.gemma_orchestrator import map_leetcode_to_sahai
+                
+                mapped_nodes = map_leetcode_to_sahai(title, tags, description)
+                
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": True, "mapped_nodes": mapped_nodes}).encode('utf-8'))
+            except Exception as e:
+                logger.error(f"Error in /gemma-map-problem endpoint: {e}")
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode('utf-8'))
         else:
             self.send_response(404)
             self.end_headers()
