@@ -99,10 +99,68 @@ class OCRHandwritingHandler:
         if "," in raw_base64:
             raw_base64 = raw_base64.split(",", 1)[1]
             
-        # Try Groq Vision OCR first
+        # Try OpenRouter Gemma-4 Vision OCR first
+        openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+        if openrouter_key:
+            print("[DEVELOPER DEBUG] Stage 0: Attempting high-fidelity Vision OCR via OpenRouter (google/gemma-4-26b-a4b-it)...")
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {openrouter_key}",
+                "HTTP-Referer": "https://sah-ai-xi.vercel.app/",
+                "X-Title": "SahAI"
+            }
+            payload = {
+                "model": "google/gemma-4-26b-a4b-it",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Transcribe the handwritten Python/code in this image. Return ONLY the raw Python code. Do not wrap it in markdown block quotes (no ```), do not include any introductions or explanations. Just return the pure code."
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{raw_base64}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 500,
+                "temperature": 0.1
+            }
+            
+            try:
+                response = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=25
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    content = result["choices"][0]["message"]["content"]
+                    cleaned_code = self._clean_llm_ocr_output(content)
+                    if cleaned_code:
+                        print("[DEVELOPER DEBUG] OpenRouter Gemma-4 Vision OCR Status: SUCCESS")
+                        print(f"[DEVELOPER DEBUG] Cleaned Code Snippet Preview:\n{cleaned_code[:500]}\n" + "-"*30)
+                        print("="*80)
+                        return cleaned_code
+                    else:
+                        print("[DEVELOPER DEBUG] OpenRouter Vision OCR returned empty text content.")
+                else:
+                    print(f"[DEVELOPER DEBUG] OpenRouter API returned error status {response.status_code}: {response.text}")
+            except Exception as vision_ex:
+                print(f"[DEVELOPER DEBUG] OpenRouter API call threw exception: {vision_ex}")
+            
+            print("[DEVELOPER DEBUG] OpenRouter Vision OCR failed. Attempting Groq Vision fallback...")
+
+        # Try Groq Vision OCR second
         groq_key = os.environ.get("GROQ_API_KEY")
         if groq_key:
-            print("[DEVELOPER DEBUG] Stage 0: Attempting high-fidelity Vision OCR via Groq (qwen/qwen3.6-27b)...")
+            print("[DEVELOPER DEBUG] Stage 1: Attempting high-fidelity Vision OCR via Groq (qwen/qwen3.6-27b)...")
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {groq_key}"
@@ -156,7 +214,7 @@ class OCRHandwritingHandler:
             
             print("[DEVELOPER DEBUG] Groq Vision OCR failed/unavailable. Falling back to local Tesseract OCR engine...")
         else:
-            print("[DEVELOPER DEBUG] GROQ_API_KEY not found in environment. Skipping Vision OCR and running local Tesseract OCR...")
+            print("[DEVELOPER DEBUG] Groq API fallback skipped. Running local Tesseract OCR...")
 
         # Fallback Local Tesseract OCR Pipeline
         try:
